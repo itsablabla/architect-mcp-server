@@ -1,4 +1,4 @@
-# Architect-MCP
+# Architect MCP Server
 
 An MCP server that lets AI agents build, manage, and share their own tools — on the fly. Instead of being limited to a fixed set of capabilities, your AI agent can write a new tool, test it, publish it to a shared marketplace, and reuse it forever.
 
@@ -100,14 +100,14 @@ Use `save_tool` to make it live. That's it — the tool now works like any built
 The bread and butter. These are the tools your agent uses to create and manage other tools.
 
 | Tool | What It Does |
-|------|-------------|
+| :--- | :--- |
 | `create_tool` | Build a new tool from scratch |
 | `update_tool` | Change an existing tool's code, schema, or settings |
 | `delete_tool` | Remove a tool you no longer need |
 | `save_tool` | Activate a tool so it can be called |
 | `validate_tool` | Check if your code has syntax errors (without creating anything) |
 | `list_tools` | See all your tools, with optional filters by category or tag |
-| `get_tool_source` | Look at a tool's code and configuration |
+| `get_tool_source`| Look at a tool's code and configuration |
 | `reload_tools` | Re-register all approved tools (useful after manual edits) |
 
 ### Permissions & Security

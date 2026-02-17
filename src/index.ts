@@ -50,7 +50,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CUSTOM_TOOLS_DIR = path.resolve(__dirname, "..", "custom_tools");
 
 const server = new McpServer({
-    name: "architect-mcp",
+    name: "architect-mcp-server",
     version: "1.0.0",
 }, {
     capabilities: {

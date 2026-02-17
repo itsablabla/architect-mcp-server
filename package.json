@@ -1,7 +1,7 @@
 {
-  "name": "architect-mcp",
+  "name": "architect-mcp-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Powerful, self-extending MCP server for dynamic AI tool orchestration with sandboxed execution, capability-based security, and a built-in dashboard.",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
