@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architect-MCP Dashboard</title>
+    <meta name="description" content="Management dashboard for Architect-MCP Server - monitor tools, stats, and configurations">
+    <link rel="stylesheet" href="/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app">
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">⚡</span>
+                    <span class="logo-text">Architect-MCP</span>
+                </div>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#" class="nav-link active" data-section="overview"><span class="nav-icon">📊</span>Overview</a></li>
+                <li><a href="#" class="nav-link" data-section="tools"><span class="nav-icon">🔧</span>Tools</a></li>
+                <li><a href="#" class="nav-link" data-section="audit"><span class="nav-icon">📋</span>Audit Log</a></li>
+                <li><a href="#" class="nav-link" data-section="permissions"><span class="nav-icon">🔒</span>Permissions</a></li>
+                <li><a href="#" class="nav-link" data-section="schedules"><span class="nav-icon">⏰</span>Schedules</a></li>
+                <li><a href="#" class="nav-link" data-section="webhooks"><span class="nav-icon">🔗</span>Webhooks</a></li>
+                <li><a href="#" class="nav-link" data-section="pipelines"><span class="nav-icon">🔀</span>Pipelines</a></li>
+                <li><a href="#" class="nav-link" data-section="cache"><span class="nav-icon">💾</span>Cache</a></li>
+                <li><a href="#" class="nav-link" data-section="secrets"><span class="nav-icon">🔐</span>Secrets</a></li>
+                <li><a href="#" class="nav-link" data-section="aliases"><span class="nav-icon">🏷️</span>Aliases</a></li>
+                <li><a href="#" class="nav-link" data-section="marketplace"><span class="nav-icon">🏪</span>Marketplace</a></li>
+                <li><a href="#" class="nav-link" data-section="resources"><span class="nav-icon">📦</span>Resources</a></li>
+                <li><a href="#" class="nav-link" data-section="prompts"><span class="nav-icon">💬</span>Prompts</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <header class="content-header">
+                <h1 id="page-title">Overview</h1>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="app.refresh()">↻ Refresh</button>
+                </div>
+            </header>
+            <div id="main-content" class="content-body"></div>
+        </main>
+    </div>
+    <script src="/app.js"></script>
+</body>
+</html>

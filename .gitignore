@@ -1,0 +1,11 @@
+node_modules/
+dist/
+npm-debug.log*
+*.log
+.env
+data/
+custom_tools/
+marketplace/
+permissions.json
+audit.log
+execution_history.json

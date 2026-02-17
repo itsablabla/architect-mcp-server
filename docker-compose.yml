@@ -1,0 +1,14 @@
+services:
+  architect-mcp:
+    build: .
+    container_name: architect-mcp
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+      - "3002:3002"
+    volumes:
+      - ./custom_tools:/app/custom_tools
+      - ./data:/app/data
+      - ./marketplace:/app/marketplace
+    environment:
+      - NODE_ENV=production
