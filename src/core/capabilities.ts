@@ -1,6 +1,7 @@
 import {
     Capability,
     NetCapability,
+    NetEndpointScope,
     FsCapability,
     ChildProcessCapability,
     EnvCapability,
@@ -22,7 +23,33 @@ export function parseCapability(capString: string): ParsedCapability {
         case "net": {
             const cap: NetCapability = { type: "net" };
             if (parts.length > 1 && parts[1]) {
-                cap.domains = parts[1].split(",").map(d => d.trim()).filter(Boolean);
+                const netRest = parts[1];
+                const hashIdx = netRest.indexOf("#");
+                if (hashIdx === -1) {
+                    cap.domains = netRest.split(",").map(d => d.trim()).filter(Boolean);
+                } else {
+                    const domainPart = netRest.slice(0, hashIdx);
+                    const scopePart = netRest.slice(hashIdx + 1);
+                    if (domainPart) {
+                        cap.domains = domainPart.split(",").map(d => d.trim()).filter(Boolean);
+                    }
+                    const slashIdx = scopePart.indexOf("/");
+                    const methodStr = slashIdx === -1 ? scopePart : scopePart.slice(0, slashIdx);
+                    const pathStr = slashIdx === -1 ? undefined : scopePart.slice(slashIdx);
+                    const methods = methodStr.split(",").map(m => m.trim().toUpperCase()).filter(Boolean);
+                    if (methods.length > 0) {
+                        cap.allowedMethods = methods;
+                    }
+                    if (pathStr && cap.domains && cap.domains.length > 0) {
+                        cap.endpoints = {};
+                        for (const domain of cap.domains) {
+                            const scope: NetEndpointScope = {};
+                            if (methods.length > 0) scope.methods = methods;
+                            scope.pathPattern = pathStr;
+                            cap.endpoints[domain] = scope;
+                        }
+                    }
+                }
             }
             return { capability: cap, raw: trimmed };
         }
@@ -81,11 +108,22 @@ export function validateCapabilities(caps: Capability[]): { valid: boolean; erro
 
 export function capabilityToString(cap: Capability): string {
     switch (cap.type) {
-        case "net":
-            return cap.domains?.length ? `net:${cap.domains.join(",")}` : "net";
-        case "fs":
+        case "net": {
+            const domainStr = cap.domains?.length ? cap.domains.join(",") : "";
+            const firstEndpoint = cap.endpoints && cap.domains?.length
+                ? cap.endpoints[cap.domains[0]]
+                : undefined;
+            const methodStr = cap.allowedMethods?.length ? cap.allowedMethods.join(",") : "";
+            const pathStr = firstEndpoint?.pathPattern ?? "";
+            if (!domainStr) return "net";
+            if (!methodStr && !pathStr) return `net:${domainStr}`;
+            if (!pathStr) return `net:${domainStr}#${methodStr}`;
+            return `net:${domainStr}#${methodStr}${pathStr}`;
+        }
+        case "fs": {
             const pathStr = cap.paths?.length ? `:${cap.paths.join(",")}` : "";
             return `fs:${cap.mode}${pathStr}`;
+        }
         case "child_process":
             return cap.commands?.length ? `child_process:${cap.commands.join(",")}` : "child_process";
         case "env":
@@ -107,7 +145,14 @@ export function capabilitySatisfies(granted: Capability, requested: Capability):
             if (!req.domains || req.domains.length === 0) {
                 return false;
             }
-            return req.domains.every(d => granted.domains!.includes(d));
+            if (!req.domains.every(d => granted.domains!.includes(d))) {
+                return false;
+            }
+            if (granted.allowedMethods?.length) {
+                if (!req.allowedMethods?.length) return false;
+                if (!req.allowedMethods.every(m => granted.allowedMethods!.includes(m))) return false;
+            }
+            return true;
         }
 
         case "fs": {
@@ -174,18 +219,27 @@ export function findMissingCapabilities(
 
 export function formatCapability(cap: Capability): string {
     switch (cap.type) {
-        case "net":
-            if (cap.domains?.length) {
-                return `NETWORK (domains: ${cap.domains.join(", ")})`;
+        case "net": {
+            if (!cap.domains?.length) return "NETWORK (all domains)";
+            let desc = `NETWORK (domains: ${cap.domains.join(", ")})`;
+            if (cap.allowedMethods?.length) {
+                desc += ` [methods: ${cap.allowedMethods.join(", ")}]`;
             }
-            return "NETWORK (all domains)";
+            const firstDomain = cap.domains[0];
+            const scope = cap.endpoints?.[firstDomain];
+            if (scope?.pathPattern) {
+                desc += ` [path: ${scope.pathPattern}]`;
+            }
+            return desc;
+        }
 
-        case "fs":
+        case "fs": {
             const modeStr = cap.mode.toUpperCase().replace("_", "/");
             if (cap.paths?.length) {
                 return `FILESYSTEM ${modeStr} (paths: ${cap.paths.join(", ")})`;
             }
             return `FILESYSTEM ${modeStr} (all paths)`;
+        }
 
         case "child_process":
             if (cap.commands?.length) {

@@ -2,9 +2,16 @@ import { z } from "zod";
 
 export type CapabilityType = "net" | "fs" | "child_process" | "env";
 
+export interface NetEndpointScope {
+    methods?: string[];
+    pathPattern?: string;
+}
+
 export interface NetCapability {
     type: "net";
     domains?: string[];
+    allowedMethods?: string[];
+    endpoints?: Record<string, NetEndpointScope>;
 }
 
 export interface FsCapability {

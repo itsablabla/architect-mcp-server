@@ -88,6 +88,13 @@ interface SandboxContext {
     __reject: (error: any) => void;
 }
 
+function matchPathPattern(pattern: string, pathname: string): boolean {
+    const escaped = pattern
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`).test(pathname);
+}
+
 function createNetworkApi(cap: NetCapability): (url: string, options?: RequestInit) => Promise<any> {
     return async (url: string, options?: RequestInit) => {
         const parsed = new URL(url);
@@ -97,6 +104,38 @@ function createNetworkApi(cap: NetCapability): (url: string, options?: RequestIn
                 throw new Error(
                     `Network access to '${parsed.hostname}' not permitted. ` +
                     `Allowed domains: ${cap.domains.join(", ")}`
+                );
+            }
+        }
+
+        const method = ((options as any)?.method ?? "GET").toUpperCase();
+
+        if (cap.allowedMethods && cap.allowedMethods.length > 0) {
+            if (!cap.allowedMethods.includes(method)) {
+                throw new Error(
+                    `HTTP method '${method}' not permitted. ` +
+                    `Allowed methods: ${cap.allowedMethods.join(", ")}`
+                );
+            }
+        }
+
+        if (cap.endpoints) {
+            const scope = cap.endpoints[parsed.hostname];
+            if (!scope) {
+                throw new Error(
+                    `No endpoint scope defined for host '${parsed.hostname}'.`
+                );
+            }
+            if (scope.methods && scope.methods.length > 0 && !scope.methods.includes(method)) {
+                throw new Error(
+                    `HTTP method '${method}' not permitted for '${parsed.hostname}'. ` +
+                    `Allowed: ${scope.methods.join(", ")}`
+                );
+            }
+            if (scope.pathPattern && !matchPathPattern(scope.pathPattern, parsed.pathname)) {
+                throw new Error(
+                    `Path '${parsed.pathname}' does not match allowed pattern '${scope.pathPattern}' ` +
+                    `for host '${parsed.hostname}'.`
                 );
             }
         }
