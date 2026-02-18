@@ -2,6 +2,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { MarketplaceEntry, CustomTool, ExportedTool } from "../types.js";
+import { getToolStats } from "../core/history.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MARKETPLACE_DIR = path.resolve(__dirname, "..", "marketplace");
@@ -85,14 +86,28 @@ export async function deleteFromMarketplace(id: string): Promise<boolean> {
 }
 
 export function formatMarketplaceEntry(entry: MarketplaceEntry): string {
-    return [
+    const lines = [
         `${entry.name} (v${entry.version}) by ${entry.author}`,
         `  ID: ${entry.id}`,
         `  Category: ${entry.category}`,
         `  Tags: ${entry.tags.join(", ") || "none"}`,
         `  Description: ${entry.description}`,
         `  Exported: ${entry.exportedAt}`
-    ].join("\n");
+    ];
+    if (entry.installs !== undefined) {
+        lines.push(`  Installs: ${entry.installs}`);
+    }
+    if (entry.failureReports !== undefined) {
+        lines.push(`  Failure Reports: ${entry.failureReports}`);
+    }
+    if (entry.successRate !== undefined) {
+        lines.push(`  Success Rate: ${entry.successRate}%`);
+    }
+    if (entry.usageStats) {
+        const u = entry.usageStats;
+        lines.push(`  Usage: ${u.totalCalls} calls, ${u.successfulCalls} ok, ${u.failedCalls} failed, avg ${u.averageDurationMs}ms`);
+    }
+    return lines.join("\n");
 }
 
 export interface RemoteRepoConfig {
@@ -275,6 +290,14 @@ export async function installFromRemote(
     try {
         const decoded = Buffer.from(result.data.content, "base64").toString("utf-8");
         const entry = JSON.parse(decoded) as MarketplaceEntry;
+
+        const updated: MarketplaceEntry = { ...entry, installs: (entry.installs ?? 0) + 1 };
+        await githubApi(`tools/${id}.json`, token, "PUT", {
+            message: `Increment installs: ${id}`,
+            content: Buffer.from(JSON.stringify(updated, null, 2)).toString("base64"),
+            sha: result.data.sha
+        });
+
         return entry.exportedTool;
     } catch {
         return null;
@@ -308,4 +331,67 @@ export async function deleteFromRemote(
     });
 
     return { deleted: result.ok };
+}
+
+export async function reportToolIssue(
+    id: string,
+    token: string
+): Promise<{ ok: boolean; failureReports: number; successRate: number }> {
+    const result = await githubApi(`tools/${id}.json`, token);
+    if (!result.ok) throw new Error(`Tool '${id}' not found in marketplace.`);
+
+    const decoded = Buffer.from(result.data.content, "base64").toString("utf-8");
+    const entry = JSON.parse(decoded) as MarketplaceEntry;
+
+    const installs = entry.installs ?? 0;
+    const failureReports = (entry.failureReports ?? 0) + 1;
+    const successRate = installs > 0 ? Math.max(0, Math.round(((installs - failureReports) / installs) * 100)) : 0;
+
+    const updated: MarketplaceEntry = { ...entry, failureReports, successRate };
+    await githubApi(`tools/${id}.json`, token, "PUT", {
+        message: `Report issue: ${id}`,
+        content: Buffer.from(JSON.stringify(updated, null, 2)).toString("base64"),
+        sha: result.data.sha
+    });
+
+    return { ok: true, failureReports, successRate };
+}
+
+export async function publishToolStats(
+    id: string,
+    toolName: string,
+    token: string
+): Promise<{ ok: boolean; message: string }> {
+    const stats = await getToolStats(toolName);
+    if (!stats) {
+        return { ok: false, message: `No local stats found for tool '${toolName}'.` };
+    }
+
+    const result = await githubApi(`tools/${id}.json`, token);
+    if (!result.ok) throw new Error(`Tool '${id}' not found in marketplace.`);
+
+    const decoded = Buffer.from(result.data.content, "base64").toString("utf-8");
+    const entry = JSON.parse(decoded) as MarketplaceEntry;
+
+    const updated: MarketplaceEntry = {
+        ...entry,
+        usageStats: {
+            totalCalls: stats.totalCalls,
+            successfulCalls: stats.successfulCalls,
+            failedCalls: stats.failedCalls,
+            averageDurationMs: stats.averageDurationMs,
+            lastPublishedAt: new Date().toISOString()
+        }
+    };
+
+    await githubApi(`tools/${id}.json`, token, "PUT", {
+        message: `Publish usage stats: ${id}`,
+        content: Buffer.from(JSON.stringify(updated, null, 2)).toString("base64"),
+        sha: result.data.sha
+    });
+
+    return {
+        ok: true,
+        message: `Stats published for '${toolName}': ${stats.totalCalls} calls, ${stats.successfulCalls} ok, avg ${stats.averageDurationMs}ms`
+    };
 }

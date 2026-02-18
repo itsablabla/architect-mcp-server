@@ -1,8 +1,9 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { ScheduleConfig, ScheduleStore } from "../types.js";
+import { ScheduleConfig, ScheduleStore, CustomTool } from "../types.js";
 import { CronExpressionParser } from "cron-parser";
+import { runToolTests } from "../tools/testing.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEDULES_FILE = path.resolve(__dirname, "..", "schedules.json");
@@ -10,6 +11,9 @@ const SCHEDULES_SCHEMA_VERSION = 1;
 
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 let schedulerExecutor: ((toolName: string, params: Record<string, unknown>) => Promise<any>) | null = null;
+let deprecationInterval: ReturnType<typeof setInterval> | null = null;
+let deprecationToolReader: (() => Promise<CustomTool[]>) | null = null;
+let deprecationToolWriter: ((tool: CustomTool) => Promise<void>) | null = null;
 
 async function fileExists(filePath: string): Promise<boolean> {
     try {
@@ -161,4 +165,56 @@ export function formatSchedule(schedule: ScheduleConfig): string {
         `  Next Run: ${schedule.nextRun || "N/A"}`,
         `  Params: ${JSON.stringify(schedule.params)}`
     ].join("\n");
+}
+
+async function checkAndMarkDeprecated(): Promise<void> {
+    if (!deprecationToolReader || !deprecationToolWriter) return;
+
+    let tools: CustomTool[];
+    try {
+        tools = await deprecationToolReader();
+    } catch {
+        return;
+    }
+
+    for (const tool of tools) {
+        if (!tool.tests || tool.tests.length === 0) continue;
+
+        try {
+            const result = await runToolTests(tool, {});
+            const allFailed = result.failed === result.totalTests && result.totalTests > 0;
+
+            if (allFailed && !tool.failingSince) {
+                tool.failingSince = new Date().toISOString();
+                await deprecationToolWriter(tool);
+            } else if (!allFailed && tool.failingSince) {
+                delete tool.failingSince;
+                delete tool.deprecated;
+                await deprecationToolWriter(tool);
+            }
+        } catch {
+        }
+    }
+}
+
+export function startDeprecationChecker(
+    toolReader: () => Promise<CustomTool[]>,
+    toolWriter: (tool: CustomTool) => Promise<void>,
+    intervalMs = 6 * 60 * 60 * 1000
+): void {
+    if (deprecationInterval) return;
+    deprecationToolReader = toolReader;
+    deprecationToolWriter = toolWriter;
+    deprecationInterval = setInterval(() => {
+        checkAndMarkDeprecated().catch(() => { });
+    }, intervalMs);
+}
+
+export function stopDeprecationChecker(): void {
+    if (deprecationInterval) {
+        clearInterval(deprecationInterval);
+        deprecationInterval = null;
+    }
+    deprecationToolReader = null;
+    deprecationToolWriter = null;
 }

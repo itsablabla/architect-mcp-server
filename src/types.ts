@@ -96,6 +96,8 @@ export interface CustomTool {
     cache?: CacheConfig;
     retry?: RetryConfig;
     tests?: TestCase[];
+    failingSince?: string;
+    deprecated?: boolean;
 }
 
 export interface JsonSchema {
@@ -330,6 +332,16 @@ export interface MarketplaceEntry {
     exportedAt: string;
     owner_id?: number;
     owner_login?: string;
+    installs?: number;
+    failureReports?: number;
+    successRate?: number;
+    usageStats?: {
+        totalCalls: number;
+        successfulCalls: number;
+        failedCalls: number;
+        averageDurationMs: number;
+        lastPublishedAt: string;
+    };
 }
 
 export interface ToolAlias {
@@ -521,4 +533,13 @@ export function migrateToolData(raw: any): CustomTool {
         tags: raw.tags ?? [],
         dependencies: raw.dependencies ?? [],
     };
+}
+
+export interface AgentPersona {
+    name: string;
+    description: string;
+    tools: string[];
+    systemPrompt?: string;
+    createdAt: string;
+    updatedAt: string;
 }

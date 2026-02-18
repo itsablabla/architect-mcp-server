@@ -37,15 +37,16 @@ import { runToolTests, formatTestResults } from "./tools/testing.js";
 import { createAlias, deleteAlias, getAlias, listAllAliases, resolveAliasParams } from "./tools/aliases.js";
 import { executeBatch, formatBatchResult } from "./execution/batch.js";
 import { createPipeline, getPipeline, deletePipeline, listAllPipelines, executePipeline, formatPipelineResult } from "./execution/pipelines.js";
-import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule } from "./execution/scheduler.js";
+import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
 import { createWebhook, deleteWebhook, listAllWebhooks, startWebhookServer, stopWebhookServer, formatWebhook } from "./execution/webhooks.js";
-import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote } from "./tools/marketplace.js";
+import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote, reportToolIssue, publishToolStats } from "./tools/marketplace.js";
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
 import { createPrompt, getPrompt, deletePrompt, listAllPrompts, renderPrompt, formatPrompt } from "./mcp/prompts.js";
 import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache, flushCache, startCacheFlushInterval, stopCacheFlushInterval } from "./core/cache.js";
 import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.js";
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
 import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
+import { createPersona, getPersona, updatePersona, deletePersona, listPersonas, formatPersona } from "./tools/personas.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CUSTOM_TOOLS_DIR = path.resolve(__dirname, "..", "custom_tools");
@@ -160,6 +161,12 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
         async (params: Record<string, unknown>) => {
             const startTime = Date.now();
 
+            let deprecationWarning = "";
+            if (tool.failingSince) {
+                const daysSince = Math.floor((Date.now() - new Date(tool.failingSince).getTime()) / 86400000);
+                deprecationWarning = `⚠️ This tool has been failing since ${tool.failingSince} (${daysSince}d). Consider calling update_tool to fix it.\n\n`;
+            }
+
             if (tool.rateLimit) {
                 const rateCheck = await checkRateLimit(tool.name, tool.rateLimit);
                 if (!rateCheck.allowed) {
@@ -208,13 +215,13 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
                 if (result.logs.length > 0) {
                     output += `\n\nLogs:\n${result.logs.join("\n")}`;
                 }
-                return createToolResponse(output);
+                return createToolResponse(deprecationWarning + output);
             } catch (err) {
                 const duration = Date.now() - startTime;
                 const errorMsg = err instanceof Error ? err.message : String(err);
                 await recordExecution(tool.name, false, duration);
                 await logAudit("tool_execution_failed", tool.name, { error: errorMsg }, duration);
-                return createToolResponse(`Execution Error: ${errorMsg}`);
+                return createToolResponse(`Execution Error: ${errorMsg}\n\nTo fix this tool, call update_tool with name '${tool.name}' and a corrected version of the code below:\n\n\`\`\`javascript\n${tool.code}\n\`\`\``);
             } finally {
                 sandbox.dispose();
             }
@@ -249,10 +256,11 @@ server.registerTool(
             dependencies: z.array(z.string()).optional().describe("Names of other tools this tool can call"),
             rate_limit_per_minute: z.number().optional().describe("Max calls per minute"),
             rate_limit_per_hour: z.number().optional().describe("Max calls per hour"),
-            author: z.string().optional()
+            author: z.string().optional(),
+            github_token: z.string().optional().describe("GitHub token to auto-check marketplace before creating")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author, github_token }) => {
         try {
             const validation = validateToolName(name);
             if (!validation.valid) {
@@ -261,6 +269,50 @@ server.registerTool(
 
             if (await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' already exists. Use update_tool to modify it.`);
+            }
+
+            if (github_token) {
+                try {
+                    const marketplaceMatches = await browseRemote(github_token, name);
+                    if (marketplaceMatches.length > 0) {
+                        const suggestions = marketplaceMatches
+                            .slice(0, 3)
+                            .map(e => `  - ${e.name} by ${e.author}: ${e.description}`)
+                            .join("\n");
+                        return createToolResponse(
+                            `Marketplace match found for '${name}'. Install instead of rebuilding:\n\n${suggestions}\n\nUse install_from_remote to install one of these.`
+                        );
+                    }
+                } catch {
+                }
+            }
+
+            {
+                const existingFiles = await getAllToolFiles();
+                if (existingFiles.length > 0) {
+                    const terms = `${name} ${description}`.toLowerCase().split(/\s+/).filter(t => t.length > 3);
+                    const compositionCandidates: { name: string; description: string; score: number }[] = [];
+
+                    for (const file of existingFiles) {
+                        const et = await readToolData(file.replace(".json", ""));
+                        let score = 0;
+                        for (const term of terms) {
+                            if (et.name.toLowerCase().includes(term)) score += 3;
+                            if (et.description.toLowerCase().includes(term)) score += 2;
+                            if (et.tags?.some(tag => tag.toLowerCase().includes(term))) score += 1;
+                        }
+                        if (score >= 4) compositionCandidates.push({ name: et.name, description: et.description, score });
+                    }
+
+                    if (compositionCandidates.length > 0) {
+                        compositionCandidates.sort((a, b) => b.score - a.score);
+                        const top = compositionCandidates.slice(0, 3);
+                        const hint = top.map(c => `  - ${c.name}: ${c.description}`).join("\n");
+                        return createToolResponse(
+                            `Before creating '${name}', consider composing these existing tools instead:\n\n${hint}\n\nUse callTool() in your code or set dependencies[] to chain them. If none fit, call create_tool again to proceed.`
+                        );
+                    }
+                }
             }
 
             const codeValidation = validateCode(code);
@@ -361,16 +413,29 @@ server.registerTool(
             tags: z.array(z.string()).optional(),
             dependencies: z.array(z.string()).optional(),
             rate_limit_per_minute: z.number().optional(),
-            rate_limit_per_hour: z.number().optional()
+            rate_limit_per_hour: z.number().optional(),
+            github_token: z.string().optional().describe("GitHub token to check marketplace for newer version")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, github_token }) => {
         try {
             if (!await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' not found.`);
             }
 
             const existing = await readToolData(name);
+
+            let marketplaceNote = "";
+            if (github_token) {
+                try {
+                    const matches = await browseRemote(github_token, name);
+                    const remote = matches.find(e => e.name === name);
+                    if (remote && parseInt(remote.version, 10) > existing.version) {
+                        marketplaceNote = `\n\n💡 Marketplace has v${remote.version} of '${name}' by ${remote.author}. Consider installing it instead with install_from_remote.`;
+                    }
+                } catch {
+                }
+            }
 
             if (code) {
                 const codeValidation = validateCode(code);
@@ -437,16 +502,17 @@ server.registerTool(
                     return createToolResponse(
                         kp +
                         `Tool '${name}' updated to v${updated.version} but deactivated.\n\n` +
-                        `New capabilities require approval:\n${formatCapabilities(missing)}`
+                        `New capabilities require approval:\n${formatCapabilities(missing)}` +
+                        marketplaceNote
                     );
                 }
 
                 await registerCustomTool(updated);
                 await notifyToolsChanged();
-                return createToolResponse(kp + `Tool '${name}' updated to v${updated.version} and reloaded.`);
+                return createToolResponse(kp + `Tool '${name}' updated to v${updated.version} and reloaded.` + marketplaceNote);
             }
 
-            return createToolResponse(kp + `Tool '${name}' updated to v${updated.version}.`);
+            return createToolResponse(kp + `Tool '${name}' updated to v${updated.version}.` + marketplaceNote);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -1849,7 +1915,49 @@ server.registerTool(
 );
 
 server.registerTool(
+    "report_tool_issue",
+    {
+        description: "Report a failure or issue with a marketplace tool. Increments its failure report count and recalculates success rate.",
+        inputSchema: z.object({
+            id: z.string().describe("Marketplace tool ID"),
+            github_token: z.string().describe("GitHub token")
+        }),
+    },
+    async ({ id, github_token }) => {
+        try {
+            const result = await reportToolIssue(id, github_token);
+            return createToolResponse(
+                `Issue reported for '${id}'.\n  Failure Reports: ${result.failureReports}\n  Success Rate: ${result.successRate}%`
+            );
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "publish_tool_stats",
+    {
+        description: "Publish local tool execution stats to its marketplace entry so others can see real-world usage data.",
+        inputSchema: z.object({
+            id: z.string().describe("Marketplace tool ID"),
+            tool_name: z.string().describe("Local tool name to read stats from"),
+            github_token: z.string().describe("GitHub token")
+        }),
+    },
+    async ({ id, tool_name, github_token }) => {
+        try {
+            const result = await publishToolStats(id, tool_name, github_token);
+            return createToolResponse(result.message);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
     "create_resource",
+
     {
         description: "Create an MCP resource.",
         inputSchema: z.object({
@@ -2039,6 +2147,242 @@ server.registerTool(
 );
 
 server.registerTool(
+    "search_tools",
+    {
+        description: "Search tools using natural language. Scores results by relevance across name, description, tags, and category.",
+        inputSchema: z.object({
+            query: z.string().describe("Natural language search query"),
+            limit: z.number().optional().describe("Max results to return (default 10)")
+        }),
+    },
+    async ({ query, limit = 10 }) => {
+        try {
+            const files = await getAllToolFiles();
+            const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+
+            const scored: { tool: CustomTool; score: number }[] = [];
+
+            for (const file of files) {
+                const tool = await readToolData(file.replace(".json", ""));
+                let score = 0;
+
+                for (const term of terms) {
+                    if (tool.name.toLowerCase().includes(term)) score += 4;
+                    if (tool.description.toLowerCase().includes(term)) score += 3;
+                    if (tool.tags?.some(t => t.toLowerCase().includes(term))) score += 2;
+                    if (tool.category?.toLowerCase().includes(term)) score += 1;
+                }
+
+                if (score > 0) scored.push({ tool, score });
+            }
+
+            scored.sort((a, b) => b.score - a.score);
+            const results = scored.slice(0, limit);
+
+            if (results.length === 0) {
+                return createToolResponse(`No tools found matching '${query}'.`);
+            }
+
+            const lines = results.map(({ tool, score }) =>
+                `  ${tool.name} (score: ${score})\n    ${tool.description}${tool.tags?.length ? `\n    tags: ${tool.tags.join(", ")}` : ""}`
+            );
+
+            return createToolResponse(`Found ${results.length} tool(s) for '${query}':\n\n${lines.join("\n\n")}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "get_tool_graph",
+    {
+        description: "Returns the dependency graph of all tools — which tools depend on which, roots, and orphans.",
+        inputSchema: z.object({
+            tool_name: z.string().optional().describe("If provided, returns only the subgraph for this tool")
+        }),
+    },
+    async ({ tool_name }) => {
+        try {
+            const files = await getAllToolFiles();
+            const allTools: CustomTool[] = await Promise.all(
+                files.map(f => readToolData(f.replace(".json", "")))
+            );
+
+            const nameSet = new Set(allTools.map(t => t.name));
+            const dependents: Record<string, string[]> = {};
+
+            for (const tool of allTools) {
+                dependents[tool.name] = [];
+            }
+            for (const tool of allTools) {
+                for (const dep of (tool.dependencies ?? [])) {
+                    if (nameSet.has(dep)) {
+                        dependents[dep].push(tool.name);
+                    }
+                }
+            }
+
+            if (tool_name) {
+                const tool = allTools.find(t => t.name === tool_name);
+                if (!tool) return createToolResponse(`Tool '${tool_name}' not found.`);
+
+                const deps = (tool.dependencies ?? []).filter(d => nameSet.has(d));
+                const usedBy = dependents[tool_name] ?? [];
+                const lines = [
+                    `Tool: ${tool_name}`,
+                    `  Depends on: ${deps.length ? deps.join(", ") : "(none)"}`,
+                    `  Used by:    ${usedBy.length ? usedBy.join(", ") : "(none)"}`
+                ];
+                return createToolResponse(lines.join("\n"));
+            }
+
+            const roots = allTools.filter(t => (t.dependencies ?? []).filter(d => nameSet.has(d)).length === 0);
+            const orphans = allTools.filter(t =>
+                (t.dependencies ?? []).filter(d => nameSet.has(d)).length === 0 &&
+                (dependents[t.name] ?? []).length === 0
+            );
+
+            const lines: string[] = [`Tool Dependency Graph (${allTools.length} tools)\n`];
+
+            lines.push("Roots (no dependencies):");
+            for (const t of roots) {
+                const usedBy = dependents[t.name] ?? [];
+                lines.push(`  ${t.name} → used by: ${usedBy.length ? usedBy.join(", ") : "(none)"}`);
+            }
+
+            const withDeps = allTools.filter(t => (t.dependencies ?? []).filter(d => nameSet.has(d)).length > 0);
+            if (withDeps.length > 0) {
+                lines.push("\nWith dependencies:");
+                for (const t of withDeps) {
+                    const deps = (t.dependencies ?? []).filter(d => nameSet.has(d));
+                    lines.push(`  ${t.name} → depends on: ${deps.join(", ")}`);
+                }
+            }
+
+            if (orphans.length > 0) {
+                lines.push(`\nOrphans (no deps, not used by anyone): ${orphans.map(t => t.name).join(", ")}`);
+            }
+
+            return createToolResponse(lines.join("\n"));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "create_persona",
+    {
+        description: "Create a named agent persona — a saved toolset configuration with an optional system prompt.",
+        inputSchema: z.object({
+            name: z.string().describe("Unique persona name"),
+            description: z.string().describe("What this persona is for"),
+            tools: z.array(z.string()).describe("List of tool names included in this persona"),
+            system_prompt: z.string().optional().describe("Optional system prompt override for this persona")
+        }),
+    },
+    async ({ name, description, tools, system_prompt }) => {
+        try {
+            const persona = await createPersona({ name, description, tools, systemPrompt: system_prompt });
+            return createToolResponse(`Persona '${name}' created with ${tools.length} tools.\n\n${formatPersona(persona)}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "list_personas",
+    {
+        description: "List all saved agent personas.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const personas = await listPersonas();
+            if (personas.length === 0) return createToolResponse("No personas defined yet. Use create_persona to create one.");
+            return createToolResponse(`${personas.length} persona(s):\n\n${personas.map(formatPersona).join("\n\n")}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "activate_persona",
+    {
+        description: "Activate a persona — returns its tool list and system prompt so the agent can configure itself accordingly.",
+        inputSchema: z.object({
+            name: z.string().describe("Persona name to activate")
+        }),
+    },
+    async ({ name }) => {
+        try {
+            const persona = await getPersona(name);
+            if (!persona) return createToolResponse(`Persona '${name}' not found.`);
+            const lines = [
+                `Activating persona: ${persona.name}`,
+                `Description: ${persona.description}`,
+                `Active tools (${persona.tools.length}): ${persona.tools.join(", ")}`,
+            ];
+            if (persona.systemPrompt) {
+                lines.push(`\nSystem Prompt:\n${persona.systemPrompt}`);
+            }
+            lines.push(`\nUse only the listed tools for this session to stay in persona.`);
+            return createToolResponse(lines.join("\n"));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "delete_persona",
+    {
+        description: "Delete a saved agent persona.",
+        inputSchema: z.object({
+            name: z.string().describe("Persona name to delete")
+        }),
+    },
+    async ({ name }) => {
+        try {
+            const deleted = await deletePersona(name);
+            if (!deleted) return createToolResponse(`Persona '${name}' not found.`);
+            return createToolResponse(`Persona '${name}' deleted.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "update_persona",
+    {
+        description: "Update an existing agent persona — change its description, tool list, or system prompt.",
+        inputSchema: z.object({
+            name: z.string().describe("Persona name to update"),
+            description: z.string().optional(),
+            tools: z.array(z.string()).optional().describe("Replacement tool list"),
+            system_prompt: z.string().optional()
+        }),
+    },
+    async ({ name, description, tools, system_prompt }) => {
+        try {
+            const updated = await updatePersona(name, {
+                ...(description !== undefined && { description }),
+                ...(tools !== undefined && { tools }),
+                ...(system_prompt !== undefined && { systemPrompt: system_prompt })
+            });
+            if (!updated) return createToolResponse(`Persona '${name}' not found.`);
+            return createToolResponse(`Persona '${name}' updated.\n\n${formatPersona(updated)}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
     "knowledge_cache_stats",
     {
         description: "Get statistics about the knowledge search cache.",
@@ -2098,6 +2442,7 @@ async function loadExistingTools(): Promise<void> {
 async function gracefulShutdown(): Promise<void> {
     console.error("Shutting down...");
     stopScheduler();
+    stopDeprecationChecker();
     stopCacheFlushInterval();
     await flushCache();
     stopWebhookServer();
@@ -2115,6 +2460,13 @@ async function main(): Promise<void> {
 
     startCacheFlushInterval();
     startScheduler(callToolInternal);
+    startDeprecationChecker(
+        async () => {
+            const files = await getAllToolFiles();
+            return Promise.all(files.map(f => readToolData(f.replace(".json", ""))));
+        },
+        writeToolData
+    );
     startWebhookServer(3002, callToolInternal);
     startDashboard(
         3001,

@@ -90,11 +90,11 @@ interface SandboxContext {
 
 function matchPathPattern(pattern: string, pathname: string): boolean {
     const escaped = pattern
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\\\*\\\*/g, "§§")
-        .replace(/\\\*/g, "[^/]*")
-        .replace(/§§/g, ".*")
-        .replace(/\\\{[^}]+\\\}/g, "[^/]+");
+        .replace(/\*\*/g, "§§")
+        .replace(/\{[^}]+\}/g, "[^/]+")
+        .replace(/[.+^$()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, "[^/]*")
+        .replace(/§§/g, ".*");
     return new RegExp(`^${escaped}$`).test(pathname);
 }
 
