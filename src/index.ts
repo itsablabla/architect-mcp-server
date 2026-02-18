@@ -2048,7 +2048,23 @@ async function main(): Promise<void> {
 
     startScheduler(callToolInternal);
     startWebhookServer(3002, callToolInternal);
-    startDashboard(3001, () => registeredTools, getAllToolFiles, readToolData);
+    startDashboard(
+        3001,
+        () => registeredTools,
+        getAllToolFiles,
+        readToolData,
+        async () => {
+            await loadExistingTools();
+        },
+        async (exportedJson: string) => {
+            const data = JSON.parse(exportedJson);
+            const tool = data.tool as CustomTool;
+            await writeToolData(tool);
+            await registerCustomTool(tool);
+            await notifyToolsChanged();
+            return { name: tool.name };
+        }
+    );
 
     const transport = new StdioServerTransport();
     await server.connect(transport);

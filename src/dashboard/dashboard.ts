@@ -3,7 +3,6 @@ import { fileURLToPath } from "url";
 import * as fs from "fs/promises";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { serveStatic } from "@hono/node-server/serve-static";
 import { getAllStats } from "../core/history.js";
 import { getAuditLogs } from "../core/audit.js";
 import { listAllPermissions } from "../core/permissions.js";
@@ -13,7 +12,7 @@ import { listAllSchedules } from "../execution/scheduler.js";
 import { listAllWebhooks } from "../execution/webhooks.js";
 import { listAllPipelines } from "../execution/pipelines.js";
 import { listAllAliases } from "../tools/aliases.js";
-import { listMarketplace } from "../tools/marketplace.js";
+import { listMarketplace, importFromMarketplace } from "../tools/marketplace.js";
 import { listAllResources } from "../mcp/resources.js";
 import { listAllPrompts } from "../mcp/prompts.js";
 import { CustomTool } from "../types.js";
@@ -27,7 +26,9 @@ export function startDashboard(
     port: number,
     getTools: () => Map<string, CustomTool>,
     getAllToolFiles: () => Promise<string[]>,
-    readToolData: (name: string) => Promise<CustomTool>
+    readToolData: (name: string) => Promise<CustomTool>,
+    reloadTools: () => Promise<void>,
+    installTool: (exportedJson: string) => Promise<{ name: string }>
 ): void {
     if (dashboardServer) return;
 
@@ -107,6 +108,49 @@ export function startDashboard(
             return c.json({ cleared });
         } catch {
             return c.json({ error: "Failed to clear cache" }, 500);
+        }
+    });
+
+    app.post("/api/cache", async (c) => {
+        try {
+            const body = await c.req.json().catch(() => ({}));
+            const tool = body?.tool as string | undefined;
+            let cleared: number;
+            if (tool) {
+                cleared = await clearCacheForTool(tool);
+            } else {
+                cleared = await clearAllCache();
+            }
+            return c.json({ cleared });
+        } catch {
+            return c.json({ error: "Failed to clear cache" }, 500);
+        }
+    });
+
+    app.post("/api/marketplace/install", async (c) => {
+        try {
+            const body = await c.req.json();
+            const id = body?.id as string | undefined;
+            if (!id) {
+                return c.json({ error: "Missing 'id' field" }, 400);
+            }
+            const exported = await importFromMarketplace(id);
+            if (!exported) {
+                return c.json({ error: `Marketplace entry '${id}' not found` }, 404);
+            }
+            const result = await installTool(JSON.stringify(exported));
+            return c.json({ installed: result.name });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.post("/api/tools/reload", async (c) => {
+        try {
+            await reloadTools();
+            return c.json({ reloaded: true });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
         }
     });
 
