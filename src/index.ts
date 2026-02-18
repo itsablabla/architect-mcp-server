@@ -45,6 +45,7 @@ import { createPrompt, getPrompt, deletePrompt, listAllPrompts, renderPrompt, fo
 import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache } from "./core/cache.js";
 import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.js";
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
+import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CUSTOM_TOOLS_DIR = path.resolve(__dirname, "..", "custom_tools");
@@ -323,7 +324,15 @@ server.registerTool(
             await writeToolData(tool);
             await logAudit("tool_created", name, { version: 1, category, capabilities: parsedCaps.length });
 
-            let response = `Tool '${name}' created (v1).`;
+            const cacheKey = `${name}:${description}:${code}`;
+            let knowledgePrompt = await getCachedKnowledge(cacheKey);
+            if (!knowledgePrompt) {
+                knowledgePrompt = buildKnowledgePrompt();
+                await setCachedKnowledge(cacheKey, knowledgePrompt);
+            }
+
+            let response = knowledgePrompt + "\n\n---\n\n";
+            response += `Tool '${name}' created (v1).`;
             if (parsedCaps.length > 0) {
                 response += `\n\nRequested capabilities:\n${formatCapabilities(parsedCaps)}`;
                 response += `\n\nRun 'approve_tool' then 'save_tool' to activate.`;
@@ -2006,6 +2015,38 @@ server.registerTool(
 
             const rendered = renderPrompt(prompt, parsedArgs);
             return createToolResponse(rendered);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "knowledge_cache_stats",
+    {
+        description: "Get statistics about the knowledge search cache.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const stats = await getKnowledgeCacheStats();
+            return createToolResponse(`Knowledge Cache Stats:\n\nTotal: ${stats.total}\nFresh: ${stats.fresh}\nExpired: ${stats.expired}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "clear_knowledge_cache",
+    {
+        description: "Clear the knowledge cache to force fresh searches on next tool creation.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const cleared = await clearAllKnowledgeCache();
+            return createToolResponse(`Cleared ${cleared} knowledge cache entries.`);
         } catch (error) {
             return createErrorResponse(error);
         }
