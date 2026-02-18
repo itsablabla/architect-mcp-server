@@ -126,6 +126,7 @@ export interface ToolListItem {
     capabilities: Capability[];
     category?: ToolCategory;
     tags?: string[];
+    deprecated?: boolean;
 }
 
 export interface ToolPermission {

@@ -520,7 +520,44 @@ server.registerTool(
 );
 
 server.registerTool(
+    "mark_tool_deprecated",
+    {
+        description: "Mark a tool as deprecated (or clear the deprecation). Sets failingSince and deprecated flags so agents know to stop using it and find a replacement.",
+        inputSchema: z.object({
+            name: z.string().describe("Tool name"),
+            deprecated: z.boolean().describe("true to mark deprecated, false to clear deprecation"),
+            reason: z.string().optional().describe("Optional reason for deprecation")
+        }),
+    },
+    async ({ name, deprecated, reason }) => {
+        try {
+            if (!await toolExists(name)) {
+                return createToolResponse(`Tool '${name}' not found.`);
+            }
+            const tool = await readToolData(name);
+            if (deprecated) {
+                tool.deprecated = true;
+                tool.failingSince = tool.failingSince ?? new Date().toISOString();
+            } else {
+                tool.deprecated = false;
+                delete tool.failingSince;
+            }
+            tool.updatedAt = new Date().toISOString();
+            await writeToolData(tool);
+            await logAudit(deprecated ? "tool_deprecated" : "tool_undeprecated", name, { reason });
+            const msg = deprecated
+                ? `Tool '${name}' marked as deprecated.${reason ? ` Reason: ${reason}` : ""} Agents will be warned to find a replacement.`
+                : `Tool '${name}' deprecation cleared.`;
+            return createToolResponse(msg);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
     "validate_tool",
+
     {
         description: "Validate tool code syntax without creating the tool.",
         inputSchema: z.object({
@@ -730,7 +767,8 @@ server.registerTool(
                         updatedAt: tool.updatedAt,
                         capabilities: tool.capabilities,
                         category: tool.category,
-                        tags: tool.tags
+                        tags: tool.tags,
+                        deprecated: tool.deprecated
                     });
                 } catch { continue; }
             }
@@ -740,7 +778,7 @@ server.registerTool(
             }
 
             const output = tools.map(t => {
-                const status = registeredTools.has(t.name) ? "[ACTIVE]" : "[INACTIVE]";
+                const status = registeredTools.has(t.name) ? (t.deprecated ? "[DEPRECATED]" : "[ACTIVE]") : "[INACTIVE]";
                 const cat = t.category ? `[${t.category}]` : "";
                 const tags = t.tags?.length ? ` #${t.tags.join(" #")}` : "";
                 return `${status} ${t.name} (v${t.version}) ${cat}${tags}\n  ${t.description}`;
@@ -766,7 +804,7 @@ server.registerTool(
             }
 
             const tool = await readToolData(name);
-            const status = registeredTools.has(name) ? "ACTIVE" : "INACTIVE";
+            const status = registeredTools.has(name) ? (tool.deprecated ? "DEPRECATED" : "ACTIVE") : "INACTIVE";
 
             const output = [
                 `Tool: ${tool.name} (v${tool.version}) [${status}]`,

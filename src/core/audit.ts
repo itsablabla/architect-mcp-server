@@ -41,7 +41,9 @@ export type AuditAction =
     | "alias_created"
     | "alias_deleted"
     | "marketplace_published"
-    | "marketplace_deleted_remote";
+    | "marketplace_deleted_remote"
+    | "tool_deprecated"
+    | "tool_undeprecated";
 
 export interface AuditEntry {
     timestamp: string;
