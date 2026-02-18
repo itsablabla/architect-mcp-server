@@ -228,34 +228,37 @@ export async function browseRemote(
 
     if (!Array.isArray(result.data)) return [];
 
-    const entries: MarketplaceEntry[] = [];
+    const jsonFiles = result.data.filter(
+        (f: any) => f.name.endsWith(".json") && f.name !== ".gitkeep"
+    );
 
-    for (const file of result.data) {
-        if (!file.name.endsWith(".json") || file.name === ".gitkeep") continue;
+    const settled = await Promise.all(
+        jsonFiles.map(async (file: any) => {
+            try {
+                const fileResult = await githubApi(file.path, token);
+                if (!fileResult.ok) return null;
 
-        try {
-            const fileResult = await githubApi(file.path, token);
-            if (!fileResult.ok) continue;
+                const decoded = Buffer.from(fileResult.data.content, "base64").toString("utf-8");
+                const entry = JSON.parse(decoded) as MarketplaceEntry;
 
-            const decoded = Buffer.from(fileResult.data.content, "base64").toString("utf-8");
-            const entry = JSON.parse(decoded) as MarketplaceEntry;
+                if (query) {
+                    const q = query.toLowerCase();
+                    const matches = entry.name.toLowerCase().includes(q) ||
+                        entry.description.toLowerCase().includes(q) ||
+                        entry.tags.some((t: string) => t.toLowerCase().includes(q));
+                    if (!matches) return null;
+                }
 
-            if (query) {
-                const q = query.toLowerCase();
-                const matches = entry.name.toLowerCase().includes(q) ||
-                    entry.description.toLowerCase().includes(q) ||
-                    entry.tags.some(t => t.toLowerCase().includes(q));
-                if (!matches) continue;
+                if (category && entry.category !== category) return null;
+
+                return entry;
+            } catch {
+                return null;
             }
+        })
+    );
 
-            if (category && entry.category !== category) continue;
-
-            entries.push(entry);
-        } catch {
-        }
-    }
-
-    return entries;
+    return settled.filter((e): e is MarketplaceEntry => e !== null);
 }
 
 export async function installFromRemote(

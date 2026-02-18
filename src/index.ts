@@ -42,7 +42,7 @@ import { createWebhook, deleteWebhook, listAllWebhooks, startWebhookServer, stop
 import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote } from "./tools/marketplace.js";
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
 import { createPrompt, getPrompt, deletePrompt, listAllPrompts, renderPrompt, formatPrompt } from "./mcp/prompts.js";
-import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache } from "./core/cache.js";
+import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache, flushCache, startCacheFlushInterval, stopCacheFlushInterval } from "./core/cache.js";
 import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.js";
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
 import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
@@ -421,12 +421,21 @@ server.registerTool(
             await writeToolData(updated);
             await logAudit("tool_updated", name, { version: updated.version });
 
+            const cacheKey = `${name}:${updated.description}:${updated.code}`;
+            let knowledgePrompt = await getCachedKnowledge(cacheKey);
+            if (!knowledgePrompt) {
+                knowledgePrompt = buildKnowledgePrompt();
+                await setCachedKnowledge(cacheKey, knowledgePrompt);
+            }
+            const kp = knowledgePrompt + "\n\n---\n\n";
+
             if (registeredTools.has(name)) {
                 const { approved, missing } = await checkToolApproval(updated);
                 if (!approved) {
                     await unregisterCustomTool(name);
                     await notifyToolsChanged();
                     return createToolResponse(
+                        kp +
                         `Tool '${name}' updated to v${updated.version} but deactivated.\n\n` +
                         `New capabilities require approval:\n${formatCapabilities(missing)}`
                     );
@@ -434,10 +443,10 @@ server.registerTool(
 
                 await registerCustomTool(updated);
                 await notifyToolsChanged();
-                return createToolResponse(`Tool '${name}' updated to v${updated.version} and reloaded.`);
+                return createToolResponse(kp + `Tool '${name}' updated to v${updated.version} and reloaded.`);
             }
 
-            return createToolResponse(`Tool '${name}' updated to v${updated.version}.`);
+            return createToolResponse(kp + `Tool '${name}' updated to v${updated.version}.`);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -902,7 +911,15 @@ server.registerTool(
             await writeToolData(tool);
             await logAudit("tool_created", name, { template: template_id });
 
-            let response = `Tool '${name}' created from template '${template_id}'.`;
+            const cacheKey = `${name}:${tool.description}:${tool.code}`;
+            let knowledgePrompt = await getCachedKnowledge(cacheKey);
+            if (!knowledgePrompt) {
+                knowledgePrompt = buildKnowledgePrompt();
+                await setCachedKnowledge(cacheKey, knowledgePrompt);
+            }
+
+            let response = knowledgePrompt + "\n\n---\n\n";
+            response += `Tool '${name}' created from template '${template_id}'.`;
             if (caps.length > 0) {
                 response += `\n\nCapabilities:\n${formatCapabilities(caps)}\n\nRun 'approve_tool' then 'save_tool'.`;
             } else {
@@ -2066,7 +2083,14 @@ async function loadExistingTools(): Promise<void> {
             }
             await registerCustomTool(tool);
         } catch (err) {
-            console.error(`Failed to load: ${name}`, err);
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes("JSON") || msg.includes("Unexpected token") || msg.includes("Unexpected end")) {
+                console.error(`[CORRUPT] Tool '${name}' has invalid JSON: ${msg}`);
+            } else if (msg.includes("migration") || msg.includes("schema")) {
+                console.error(`[INVALID] Tool '${name}' failed schema migration: ${msg}`);
+            } else {
+                console.error(`[ERROR] Tool '${name}' failed to load: ${msg}`);
+            }
         }
     }
 }
@@ -2074,6 +2098,8 @@ async function loadExistingTools(): Promise<void> {
 async function gracefulShutdown(): Promise<void> {
     console.error("Shutting down...");
     stopScheduler();
+    stopCacheFlushInterval();
+    await flushCache();
     stopWebhookServer();
     stopDashboard();
     process.exit(0);
@@ -2087,6 +2113,7 @@ async function main(): Promise<void> {
     await cleanExpiredCache();
     await loadExistingTools();
 
+    startCacheFlushInterval();
     startScheduler(callToolInternal);
     startWebhookServer(3002, callToolInternal);
     startDashboard(

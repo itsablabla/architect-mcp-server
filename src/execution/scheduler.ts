@@ -114,6 +114,7 @@ async function checkAndRunSchedules(): Promise<void> {
     if (!schedulerExecutor) return;
 
     const store = await loadSchedules();
+    if (Object.keys(store.schedules).length === 0) return;
     const now = new Date();
 
     for (const schedule of Object.values(store.schedules)) {
