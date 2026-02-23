@@ -47,6 +47,10 @@ import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
 import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
 import { createPersona, getPersona, updatePersona, deletePersona, listPersonas, formatPersona } from "./tools/personas.js";
+import { setMemory, getMemory, deleteMemory, listMemory, clearMemory, cleanExpiredMemory } from "./core/memory.js";
+import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, startAnomalyChecker, stopAnomalyChecker } from "./core/anomaly.js";
+import { getMutationCandidates, getMutationContext } from "./core/mutation.js";
+import { matchIntent } from "./core/intent.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CUSTOM_TOOLS_DIR = path.resolve(__dirname, "..", "custom_tools");
@@ -290,26 +294,16 @@ server.registerTool(
             {
                 const existingFiles = await getAllToolFiles();
                 if (existingFiles.length > 0) {
-                    const terms = `${name} ${description}`.toLowerCase().split(/\s+/).filter(t => t.length > 3);
-                    const compositionCandidates: { name: string; description: string; score: number }[] = [];
+                    const tools = await Promise.all(
+                        existingFiles.map(f => readToolData(f.replace(".json", "")))
+                    );
+                    const response = matchIntent(`${name} ${description}`, tools);
+                    const matches = response.matches.filter(m => m.confidence > 0.4).slice(0, 3);
 
-                    for (const file of existingFiles) {
-                        const et = await readToolData(file.replace(".json", ""));
-                        let score = 0;
-                        for (const term of terms) {
-                            if (et.name.toLowerCase().includes(term)) score += 3;
-                            if (et.description.toLowerCase().includes(term)) score += 2;
-                            if (et.tags?.some(tag => tag.toLowerCase().includes(term))) score += 1;
-                        }
-                        if (score >= 4) compositionCandidates.push({ name: et.name, description: et.description, score });
-                    }
-
-                    if (compositionCandidates.length > 0) {
-                        compositionCandidates.sort((a, b) => b.score - a.score);
-                        const top = compositionCandidates.slice(0, 3);
-                        const hint = top.map(c => `  - ${c.name}: ${c.description}`).join("\n");
+                    if (matches.length > 0) {
+                        const hint = matches.map(m => `  - ${m.tool.name} (confidence: ${(m.confidence * 100).toFixed(0)}%): ${m.tool.description}`).join("\n");
                         return createToolResponse(
-                            `Before creating '${name}', consider composing these existing tools instead:\n\n${hint}\n\nUse callTool() in your code or set dependencies[] to chain them. If none fit, call create_tool again to proceed.`
+                            `Before creating '${name}', consider using or composing these existing tools:\n\n${hint}\n\nUse callTool() in your code or set dependencies[] to chain them. If none fit, call create_tool again to proceed.`
                         );
                     }
                 }
@@ -2196,36 +2190,27 @@ server.registerTool(
     async ({ query, limit = 10 }) => {
         try {
             const files = await getAllToolFiles();
-            const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+            const tools = await Promise.all(
+                files.map(f => readToolData(f.replace(".json", "")))
+            );
 
-            const scored: { tool: CustomTool; score: number }[] = [];
+            const response = matchIntent(query, tools);
+            const matches = response.matches.slice(0, limit);
 
-            for (const file of files) {
-                const tool = await readToolData(file.replace(".json", ""));
-                let score = 0;
-
-                for (const term of terms) {
-                    if (tool.name.toLowerCase().includes(term)) score += 4;
-                    if (tool.description.toLowerCase().includes(term)) score += 3;
-                    if (tool.tags?.some(t => t.toLowerCase().includes(term))) score += 2;
-                    if (tool.category?.toLowerCase().includes(term)) score += 1;
-                }
-
-                if (score > 0) scored.push({ tool, score });
-            }
-
-            scored.sort((a, b) => b.score - a.score);
-            const results = scored.slice(0, limit);
-
-            if (results.length === 0) {
+            if (matches.length === 0) {
                 return createToolResponse(`No tools found matching '${query}'.`);
             }
 
-            const lines = results.map(({ tool, score }) =>
-                `  ${tool.name} (score: ${score})\n    ${tool.description}${tool.tags?.length ? `\n    tags: ${tool.tags.join(", ")}` : ""}`
+            const lines = matches.map(({ tool, score, confidence }) =>
+                `  ${tool.name} (confidence: ${(confidence * 100).toFixed(1)}%, score: ${score.toFixed(1)})\n    ${tool.description}${tool.tags?.length ? `\n    tags: ${tool.tags.join(", ")}` : ""}`
             );
 
-            return createToolResponse(`Found ${results.length} tool(s) for '${query}':\n\n${lines.join("\n\n")}`);
+            let output = `Found ${matches.length} tool(s) for '${query}':\n\n${lines.join("\n\n")}`;
+            if (response.suggestions && response.suggestions.length > 0) {
+                output += `\n\n💡 Suggestions:\n${response.suggestions.join("\n")}`;
+            }
+
+            return createToolResponse(output);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -2452,6 +2437,286 @@ server.registerTool(
     }
 );
 
+server.registerTool(
+    "get_anomalies",
+    {
+        description: "List all tools currently flagged as anomalous — running significantly slower or failing more than their established baseline.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const anomalies = await getActiveAnomalies();
+            if (anomalies.length === 0) {
+                return createToolResponse("No anomalies detected. All tools are performing within normal parameters.");
+            }
+            const lines = anomalies.map(a => {
+                const durationDelta = a.baselineAvgDurationMs > 0
+                    ? ` (${(a.currentAvgDurationMs / a.baselineAvgDurationMs).toFixed(1)}x baseline)`
+                    : "";
+                return [
+                    `⚠️  ${a.toolName} — detected ${a.detectedAt}`,
+                    `   Reasons: ${a.reasons.join("; ")}`,
+                    `   Duration: ${a.currentAvgDurationMs}ms${durationDelta}`,
+                    `   Fail rate: ${(a.currentFailRate * 100).toFixed(1)}% (baseline: ${(a.baselineFailRate * 100).toFixed(1)}%)`
+                ].join("\n");
+            });
+            return createToolResponse(`Anomalies (${anomalies.length}):\n\n${lines.join("\n\n")}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "run_anomaly_check",
+    {
+        description: "Manually trigger an anomaly check across all tools. Normally runs automatically every 15 minutes.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const detected = await runAnomalyCheck();
+            if (detected.length === 0) {
+                return createToolResponse("Anomaly check complete. No anomalies detected.");
+            }
+            const names = detected.map(a => `  - ${a.toolName}: ${a.reasons.join("; ")}`).join("\n");
+            return createToolResponse(`Anomaly check complete. ${detected.length} anomaly(s) detected:\n\n${names}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "clear_anomaly",
+    {
+        description: "Clear the anomaly flag for a specific tool (e.g. after fixing it). Does not reset the baseline.",
+        inputSchema: z.object({
+            tool_name: z.string().describe("Tool name to clear the anomaly flag for")
+        }),
+    },
+    async ({ tool_name }) => {
+        try {
+            const cleared = await clearAnomaly(tool_name);
+            if (!cleared) {
+                return createToolResponse(`No active anomaly for '${tool_name}'.`);
+            }
+            return createToolResponse(`Anomaly flag cleared for '${tool_name}'.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "reset_anomaly_baseline",
+    {
+        description: "Reset the performance baseline for a tool to its current stats. Use this after intentional changes that affect duration or fail rate.",
+        inputSchema: z.object({
+            tool_name: z.string().describe("Tool name to reset the baseline for")
+        }),
+    },
+    async ({ tool_name }) => {
+        try {
+            const reset = await resetBaseline(tool_name);
+            if (!reset) {
+                return createToolResponse(`No stats found for '${tool_name}'. Run the tool at least ${5} times first.`);
+            }
+            return createToolResponse(`Baseline reset for '${tool_name}'. Current stats are now the new normal.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "get_mutation_proposals",
+    {
+        description: "List tools that are candidates for proactive mutation (rewriting) based on performance anomalies or high failure rates. Helps maintain the health of the tool ecosystem.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const candidates = await getMutationCandidates();
+            if (candidates.length === 0) {
+                return createToolResponse("No mutation candidates found. All tools are performing well.");
+            }
+            const lines = candidates.map(c =>
+                `[${c.priority.toUpperCase()}] ${c.toolName}\n  Issue: ${c.anomaly.reasons.join("; ")}\n  Suggestion: ${c.suggestedAction}`
+            );
+            return createToolResponse(`Mutation Candidates (${candidates.length}):\n\n${lines.join("\n\n")}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "get_mutation_context",
+    {
+        description: "Get full historical and technical context for a tool mutation. Provides code, execution stats, recent errors, and anomaly details to enable a smart, informed rewrite.",
+        inputSchema: z.object({
+            tool_name: z.string().describe("Tool name to get context for")
+        }),
+    },
+    async ({ tool_name }) => {
+        try {
+            const context = await getMutationContext(
+                tool_name,
+                readToolData,
+                getToolStats,
+                (name, limit) => getAuditLogs({ toolName: name, limit })
+            );
+
+            const lines = [
+                `Mutation Context for '${tool_name}':`,
+                `Current Fail Rate: ${(context.anomaly?.currentFailRate || 0 * 100).toFixed(1)}% (Baseline: ${(context.anomaly?.baselineFailRate || 0 * 100).toFixed(1)}%)`,
+                `Current Avg Duration: ${context.stats?.averageDurationMs || 0}ms`,
+                `Recent Issues: ${context.anomaly?.reasons.join("; ") || "None"}`,
+                `\nRecent Logs:`,
+                ...context.recentLogs.map(l => `  [${l.timestamp}] ${l.action}${l.duration ? ` (${l.duration}ms)` : ""}${l.details ? ` - ${JSON.stringify(l.details)}` : ""}`),
+                `\nSource Code:\n\`\`\`javascript\n${context.tool.code}\n\`\`\``
+            ];
+
+            return createToolResponse(lines.join("\n"));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "set_memory",
+    {
+        description: "Persist a key/value pair in cross-session memory. Survives server restarts. Use namespaces to group related context.",
+        inputSchema: z.object({
+            key: z.string().describe("Memory key"),
+            value: z.string().describe("Value to store (string, JSON, or plain text)"),
+            namespace: z.string().optional().default("default").describe("Namespace to group related keys"),
+            ttl_seconds: z.number().optional().describe("Optional TTL in seconds — entry auto-expires after this duration")
+        }),
+    },
+    async ({ key, value, namespace, ttl_seconds }) => {
+        try {
+            await setMemory(key, value, namespace, ttl_seconds);
+            const expiry = ttl_seconds ? ` (expires in ${ttl_seconds}s)` : "";
+            return createToolResponse(`Memory set: [${namespace}] ${key}${expiry}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "get_memory",
+    {
+        description: "Retrieve a value from cross-session memory by key.",
+        inputSchema: z.object({
+            key: z.string().describe("Memory key to retrieve"),
+            namespace: z.string().optional().default("default").describe("Namespace the key belongs to")
+        }),
+    },
+    async ({ key, namespace }) => {
+        try {
+            const value = await getMemory(key, namespace);
+            if (value === null) {
+                return createToolResponse(`Memory key '[${namespace}] ${key}' not found or expired.`);
+            }
+            return createToolResponse(value);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "delete_memory",
+    {
+        description: "Delete a specific key from cross-session memory.",
+        inputSchema: z.object({
+            key: z.string().describe("Memory key to delete"),
+            namespace: z.string().optional().default("default").describe("Namespace the key belongs to")
+        }),
+    },
+    async ({ key, namespace }) => {
+        try {
+            const deleted = await deleteMemory(key, namespace);
+            if (!deleted) {
+                return createToolResponse(`Memory key '[${namespace}] ${key}' not found.`);
+            }
+            return createToolResponse(`Memory key '[${namespace}] ${key}' deleted.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "list_memory",
+    {
+        description: "List all keys in cross-session memory, optionally filtered by namespace.",
+        inputSchema: z.object({
+            namespace: z.string().optional().describe("Filter by namespace (omit to list all)")
+        }),
+    },
+    async ({ namespace }) => {
+        try {
+            const entries = await listMemory(namespace);
+            if (entries.length === 0) {
+                return createToolResponse(namespace ? `No memory entries in namespace '${namespace}'.` : "Memory is empty.");
+            }
+            const lines = entries.map(e => {
+                const expiry = e.expiresAt ? ` [expires: ${e.expiresAt}]` : "";
+                return `[${e.namespace}] ${e.key}${expiry}\n  ${e.value.length > 120 ? e.value.slice(0, 120) + "…" : e.value}`;
+            });
+            return createToolResponse(`Memory (${entries.length} entries):\n\n${lines.join("\n\n")}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "match_intent",
+    {
+        description: "Sophisticated intent matching for tools. Returns ranked matches with confidence scores and composition suggestions.",
+        inputSchema: z.object({
+            query: z.string().describe("Natural language query or intent"),
+        }),
+    },
+    async ({ query }) => {
+        try {
+            const files = await getAllToolFiles();
+            const tools = await Promise.all(
+                files.map(f => readToolData(f.replace(".json", "")))
+            );
+            const response = matchIntent(query, tools);
+            return createToolResponse(JSON.stringify(response, null, 2));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "clear_memory",
+    {
+        description: "Clear all cross-session memory entries, or all entries within a specific namespace.",
+        inputSchema: z.object({
+            namespace: z.string().optional().describe("Namespace to clear (omit to clear everything)")
+        }),
+    },
+    async ({ namespace }) => {
+        try {
+            const count = await clearMemory(namespace);
+            const scope = namespace ? `namespace '${namespace}'` : "all namespaces";
+            return createToolResponse(`Cleared ${count} memory ${count === 1 ? "entry" : "entries"} from ${scope}.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
 async function loadExistingTools(): Promise<void> {
     const files = await getAllToolFiles();
     for (const file of files) {
@@ -2481,6 +2746,7 @@ async function gracefulShutdown(): Promise<void> {
     console.error("Shutting down...");
     stopScheduler();
     stopDeprecationChecker();
+    stopAnomalyChecker();
     stopCacheFlushInterval();
     await flushCache();
     stopWebhookServer();
@@ -2505,12 +2771,14 @@ async function main(): Promise<void> {
         },
         writeToolData
     );
+    startAnomalyChecker();
     startWebhookServer(3002, callToolInternal);
     startDashboard(
         3001,
         () => registeredTools,
         getAllToolFiles,
         readToolData,
+        writeToolData,
         async () => {
             await loadExistingTools();
         },
@@ -2521,6 +2789,20 @@ async function main(): Promise<void> {
             await registerCustomTool(tool);
             await notifyToolsChanged();
             return { name: tool.name };
+        },
+        async (name: string, params: Record<string, unknown>) => {
+            const tool = registeredTools.get(name);
+            if (!tool) throw new Error(`Tool '${name}' not found`);
+            const permission = await getToolPermissions(name);
+            const approvedCaps = permission?.approvedCapabilities ?? [];
+            const sandbox = new ToolSandbox({ timeoutMs: 30000, capabilities: approvedCaps, toolCaller: callToolInternal });
+            try {
+                const r = await sandbox.execute(tool.code, params);
+                if (!r.success) throw new Error(r.error);
+                return { result: r.result, logs: r.logs };
+            } finally {
+                sandbox.dispose();
+            }
         }
     );
 

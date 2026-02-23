@@ -4,10 +4,14 @@ import * as fs from "fs/promises";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { getAllStats } from "../core/history.js";
-import { getAuditLogs } from "../core/audit.js";
+import { getAuditLogs, logAudit } from "../core/audit.js";
 import { listAllPermissions } from "../core/permissions.js";
 import { getCacheStats, clearAllCache, clearCacheForTool } from "../core/cache.js";
 import { listSecrets } from "../core/secrets.js";
+import { listMemory, clearMemory, setMemory, deleteMemory } from "../core/memory.js";
+import { getActiveAnomalies } from "../core/anomaly.js";
+import { getMutationCandidates } from "../core/mutation.js";
+import { matchIntent } from "../core/intent.js";
 import { listAllSchedules } from "../execution/scheduler.js";
 import { listAllWebhooks } from "../execution/webhooks.js";
 import { listAllPipelines } from "../execution/pipelines.js";
@@ -27,8 +31,10 @@ export function startDashboard(
     getTools: () => Map<string, CustomTool>,
     getAllToolFiles: () => Promise<string[]>,
     readToolData: (name: string) => Promise<CustomTool>,
+    writeToolData: (tool: CustomTool) => Promise<void>,
     reloadTools: () => Promise<void>,
-    installTool: (exportedJson: string) => Promise<{ name: string }>
+    installTool: (exportedJson: string) => Promise<{ name: string }>,
+    runTool: (name: string, params: Record<string, unknown>) => Promise<{ result: unknown; logs: string[] }>
 ): void {
     if (dashboardServer) return;
 
@@ -154,10 +160,164 @@ export function startDashboard(
         }
     });
 
+    app.post("/api/tools/:name/deprecate", async (c) => {
+        try {
+            const name = c.req.param("name");
+            const body = await c.req.json().catch(() => ({}));
+            const deprecated = body?.deprecated as boolean;
+            const reason = body?.reason as string | undefined;
+
+            if (typeof deprecated !== "boolean") {
+                return c.json({ error: "'deprecated' boolean field is required" }, 400);
+            }
+
+            let tool: CustomTool;
+            try {
+                tool = await readToolData(name);
+            } catch {
+                return c.json({ error: `Tool '${name}' not found` }, 404);
+            }
+
+            if (deprecated) {
+                tool.deprecated = true;
+                tool.failingSince = tool.failingSince ?? new Date().toISOString();
+            } else {
+                tool.deprecated = false;
+                delete tool.failingSince;
+            }
+            tool.updatedAt = new Date().toISOString();
+
+            await writeToolData(tool);
+            await logAudit(deprecated ? "tool_deprecated" : "tool_undeprecated", name, { reason });
+
+            return c.json({ name, deprecated, reason });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.post("/api/tools/:name/run", async (c) => {
+        try {
+            const name = c.req.param("name");
+            const body = await c.req.json().catch(() => ({}));
+            const params = (body?.params ?? {}) as Record<string, unknown>;
+
+            const activeTools = getTools();
+            if (!activeTools.has(name)) {
+                return c.json({ error: `Tool '${name}' is not active. Activate it first with save_tool.` }, 404);
+            }
+
+            const startTime = Date.now();
+            try {
+                const { result, logs } = await runTool(name, params);
+                const durationMs = Date.now() - startTime;
+                return c.json({ success: true, result, logs, durationMs });
+            } catch (err) {
+                const durationMs = Date.now() - startTime;
+                return c.json({
+                    success: false,
+                    error: err instanceof Error ? err.message : String(err),
+                    logs: [],
+                    durationMs
+                });
+            }
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
     app.get("/api/secrets", async (c) => {
         try {
             const secrets = await listSecrets();
             return c.json(secrets);
+        } catch {
+            return c.json([], 500);
+        }
+    });
+
+    app.get("/api/memory", async (c) => {
+        try {
+            const namespace = c.req.query("namespace") || undefined;
+            const entries = await listMemory(namespace);
+            return c.json(entries);
+        } catch {
+            return c.json([], 500);
+        }
+    });
+
+    app.delete("/api/memory", async (c) => {
+        try {
+            const namespace = c.req.query("namespace") || undefined;
+            const count = await clearMemory(namespace);
+            return c.json({ cleared: count });
+        } catch {
+            return c.json({ error: "Failed to clear memory" }, 500);
+        }
+    });
+
+    app.post("/api/memory/set", async (c) => {
+        try {
+            const body = await c.req.json();
+            const { key, value, namespace, ttl_seconds } = body as {
+                key: string; value: string; namespace?: string; ttl_seconds?: number;
+            };
+            if (!key || value === undefined) {
+                return c.json({ error: "'key' and 'value' are required" }, 400);
+            }
+            await setMemory(key, value, namespace, ttl_seconds);
+            return c.json({ key, namespace: namespace || "default" });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.post("/api/memory/delete", async (c) => {
+        try {
+            const body = await c.req.json();
+            const { key, namespace } = body as { key: string; namespace?: string };
+            if (!key) {
+                return c.json({ error: "'key' is required" }, 400);
+            }
+            const deleted = await deleteMemory(key, namespace);
+            return c.json({ deleted });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.post("/api/tools/match", async (c) => {
+        try {
+            const body = await c.req.json();
+            const { query } = body as { query: string };
+            if (!query) {
+                return c.json({ error: "'query' is required" }, 400);
+            }
+
+            const files = await getAllToolFiles();
+            const tools = await Promise.all(
+                files.map(f => readToolData(f.replace(".json", "")))
+            );
+
+            const result = matchIntent(query, tools);
+            return c.json(result);
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.get("/api/anomalies", async (c) => {
+        try {
+            const anomalies = await getActiveAnomalies();
+            return c.json(anomalies);
+        } catch {
+            return c.json([], 500);
+        }
+    });
+
+    app.get("/api/mutations", async (c) => {
+        try {
+            const candidates = await getMutationCandidates();
+            return c.json(candidates);
         } catch {
             return c.json([], 500);
         }
@@ -236,6 +396,7 @@ export function startDashboard(
             const webhooks = await listAllWebhooks();
             const pipelines = await listAllPipelines();
             const aliases = await listAllAliases();
+            const anomalies = await getActiveAnomalies();
 
             let totalCalls = 0;
             let totalSuccess = 0;
@@ -257,7 +418,8 @@ export function startDashboard(
                 schedulesCount: schedules.length,
                 webhooksCount: webhooks.length,
                 pipelinesCount: pipelines.length,
-                aliasesCount: aliases.length
+                aliasesCount: aliases.length,
+                anomaliesCount: anomalies.length
             });
         } catch {
             return c.json({}, 500);

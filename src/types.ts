@@ -544,3 +544,67 @@ export interface AgentPersona {
     createdAt: string;
     updatedAt: string;
 }
+
+export interface MemoryEntry {
+    key: string;
+    namespace: string;
+    value: string;
+    createdAt: string;
+    updatedAt: string;
+    expiresAt?: string;
+}
+
+export interface MemoryStore {
+    version: number;
+    entries: Record<string, MemoryEntry>;
+}
+
+export interface AnomalyBaseline {
+    avgDurationMs: number;
+    failRate: number;
+    sampledAt: string;
+    totalCallsAtSample: number;
+}
+
+export interface AnomalyRecord {
+    toolName: string;
+    detectedAt: string;
+    reasons: string[];
+    baselineAvgDurationMs: number;
+    currentAvgDurationMs: number;
+    baselineFailRate: number;
+    currentFailRate: number;
+}
+
+export interface AnomalyStore {
+    version: number;
+    baselines: Record<string, AnomalyBaseline>;
+    anomalies: Record<string, AnomalyRecord>;
+}
+
+export interface MutationCandidate {
+    toolName: string;
+    anomaly: AnomalyRecord;
+    suggestedAction: string;
+    priority: "high" | "medium" | "low";
+}
+
+export interface MutationStore {
+    version: number;
+    candidates: Record<string, MutationCandidate>;
+}
+
+export interface IntentMatch {
+    tool: ToolListItem;
+    score: number;
+    confidence: number;
+    matchedTerms: string[];
+}
+
+export interface IntentResponse {
+    query: string;
+    matches: IntentMatch[];
+    suggestions?: string[];
+}
+
+
