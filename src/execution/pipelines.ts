@@ -1,42 +1,12 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { Pipeline, PipelineStep, PipelineStore } from "../types.js";
-import { fileExists } from "../core/utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PIPELINES_FILE = path.resolve(__dirname, "..", "pipelines.json");
-const PIPELINES_SCHEMA_VERSION = 1;
-
-
-
-export async function loadPipelines(): Promise<PipelineStore> {
-    if (!await fileExists(PIPELINES_FILE)) {
-        return { version: PIPELINES_SCHEMA_VERSION, pipelines: {} };
-    }
-
-    try {
-        const content = await fs.readFile(PIPELINES_FILE, "utf-8");
-        const data = JSON.parse(content) as PipelineStore;
-        return {
-            version: data.version || PIPELINES_SCHEMA_VERSION,
-            pipelines: data.pipelines || {}
-        };
-    } catch {
-        return { version: PIPELINES_SCHEMA_VERSION, pipelines: {} };
-    }
-}
-
-export async function savePipelines(store: PipelineStore): Promise<void> {
-    await fs.writeFile(PIPELINES_FILE, JSON.stringify(store, null, 2));
-}
+import { Pipeline, PipelineStep } from "../types.js";
+import { getDb } from "../core/db.js";
 
 export async function createPipeline(
     name: string,
     description: string,
     steps: PipelineStep[]
 ): Promise<Pipeline> {
-    const store = await loadPipelines();
+    const db = getDb();
     const now = new Date().toISOString();
 
     const pipeline: Pipeline = {
@@ -47,27 +17,43 @@ export async function createPipeline(
         updatedAt: now
     };
 
-    store.pipelines[name] = pipeline;
-    await savePipelines(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO pipelines (name, description, steps, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`
+    ).run(name, description, JSON.stringify(steps), now, now);
+
     return pipeline;
 }
 
 export async function getPipeline(name: string): Promise<Pipeline | null> {
-    const store = await loadPipelines();
-    return store.pipelines[name] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM pipelines WHERE name = ?").get(name) as any;
+    if (!row) return null;
+    return {
+        name: row.name,
+        description: row.description,
+        steps: JSON.parse(row.steps),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+    };
 }
 
 export async function deletePipeline(name: string): Promise<boolean> {
-    const store = await loadPipelines();
-    if (!store.pipelines[name]) return false;
-    delete store.pipelines[name];
-    await savePipelines(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM pipelines WHERE name = ?").run(name);
+    return result.changes > 0;
 }
 
 export async function listAllPipelines(): Promise<Pipeline[]> {
-    const store = await loadPipelines();
-    return Object.values(store.pipelines);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM pipelines").all() as any[];
+    return rows.map(row => ({
+        name: row.name,
+        description: row.description,
+        steps: JSON.parse(row.steps),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+    }));
 }
 
 function substituteVariables(

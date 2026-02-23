@@ -1,78 +1,71 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { ToolAlias, AliasStore } from "../types.js";
-import { fileExists } from "../core/utils.js";
+import { ToolAlias } from "../types.js";
+import { getDb } from "../core/db.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ALIASES_FILE = path.resolve(__dirname, "..", "aliases.json");
-const ALIASES_SCHEMA_VERSION = 1;
-
-
-
-export async function loadAliases(): Promise<AliasStore> {
-    if (!await fileExists(ALIASES_FILE)) {
-        return { version: ALIASES_SCHEMA_VERSION, aliases: {} };
-    }
-
-    try {
-        const content = await fs.readFile(ALIASES_FILE, "utf-8");
-        const data = JSON.parse(content) as AliasStore;
-        return {
-            version: data.version || ALIASES_SCHEMA_VERSION,
-            aliases: data.aliases || {}
-        };
-    } catch {
-        return { version: ALIASES_SCHEMA_VERSION, aliases: {} };
-    }
-}
-
-export async function saveAliases(store: AliasStore): Promise<void> {
-    await fs.writeFile(ALIASES_FILE, JSON.stringify(store, null, 2));
-}
-
-export async function createAlias(
-    alias: string,
-    targetTool: string,
-    presetParams: Record<string, unknown>,
-    description?: string
-): Promise<ToolAlias> {
-    const store = await loadAliases();
+export async function createAlias(config: {
+    alias: string;
+    targetTool: string;
+    presetParams?: Record<string, unknown>;
+    description?: string;
+}): Promise<ToolAlias> {
+    const db = getDb();
+    const now = new Date().toISOString();
 
     const entry: ToolAlias = {
-        alias,
-        targetTool,
-        presetParams,
-        description,
-        createdAt: new Date().toISOString()
+        alias: config.alias,
+        targetTool: config.targetTool,
+        presetParams: config.presetParams || {},
+        description: config.description,
+        createdAt: now
     };
 
-    store.aliases[alias] = entry;
-    await saveAliases(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO aliases (alias, target_tool, preset_params, description, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+    ).run(entry.alias, entry.targetTool, JSON.stringify(entry.presetParams), entry.description || null, now);
+
     return entry;
 }
 
 export async function deleteAlias(alias: string): Promise<boolean> {
-    const store = await loadAliases();
-    if (!store.aliases[alias]) return false;
-    delete store.aliases[alias];
-    await saveAliases(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM aliases WHERE alias = ?").run(alias);
+    return result.changes > 0;
 }
 
 export async function getAlias(alias: string): Promise<ToolAlias | null> {
-    const store = await loadAliases();
-    return store.aliases[alias] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM aliases WHERE alias = ?").get(alias) as any;
+    if (!row) return null;
+    return rowToAlias(row);
 }
 
 export async function listAllAliases(): Promise<ToolAlias[]> {
-    const store = await loadAliases();
-    return Object.values(store.aliases);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM aliases").all() as any[];
+    return rows.map(rowToAlias);
 }
 
-export function resolveAliasParams(
-    alias: ToolAlias,
-    inputParams: Record<string, unknown>
-): Record<string, unknown> {
-    return { ...alias.presetParams, ...inputParams };
+export async function resolveAlias(
+    alias: string,
+    params: Record<string, unknown> = {}
+): Promise<{ toolName: string; mergedParams: Record<string, unknown> } | null> {
+    const config = await getAlias(alias);
+    if (!config) return null;
+
+    return {
+        toolName: config.targetTool,
+        mergedParams: { ...config.presetParams, ...params }
+    };
+}
+
+export { resolveAlias as resolveAliasParams };
+
+function rowToAlias(row: any): ToolAlias {
+    return {
+        alias: row.alias,
+        targetTool: row.target_tool,
+        presetParams: JSON.parse(row.preset_params || "{}"),
+        description: row.description || undefined,
+        createdAt: row.created_at
+    };
 }

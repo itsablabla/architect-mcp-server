@@ -1,51 +1,21 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import {
     Capability,
     CustomTool,
-    PermissionsStore,
     ToolPermission
 } from "../types.js";
 import { findMissingCapabilities } from "./capabilities.js";
-import { fileExists } from "./utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PERMISSIONS_FILE = path.resolve(__dirname, "..", "permissions.json");
-const PERMISSIONS_SCHEMA_VERSION = 1;
-
-
-
-export async function loadPermissions(): Promise<PermissionsStore> {
-    if (!await fileExists(PERMISSIONS_FILE)) {
-        return {
-            version: PERMISSIONS_SCHEMA_VERSION,
-            permissions: {}
-        };
-    }
-
-    try {
-        const content = await fs.readFile(PERMISSIONS_FILE, "utf-8");
-        const data = JSON.parse(content) as PermissionsStore;
-        return {
-            version: data.version || PERMISSIONS_SCHEMA_VERSION,
-            permissions: data.permissions || {}
-        };
-    } catch {
-        return {
-            version: PERMISSIONS_SCHEMA_VERSION,
-            permissions: {}
-        };
-    }
-}
-
-export async function savePermissions(store: PermissionsStore): Promise<void> {
-    await fs.writeFile(PERMISSIONS_FILE, JSON.stringify(store, null, 2));
-}
+import { getDb } from "./db.js";
 
 export async function getToolPermissions(toolName: string): Promise<ToolPermission | null> {
-    const store = await loadPermissions();
-    return store.permissions[toolName] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM permissions WHERE tool_name = ?").get(toolName) as any;
+    if (!row) return null;
+    return {
+        toolName: row.tool_name,
+        toolVersion: row.tool_version,
+        approvedCapabilities: JSON.parse(row.approved_capabilities),
+        approvedAt: row.approved_at
+    };
 }
 
 export async function checkToolApproval(
@@ -77,27 +47,27 @@ export async function approveToolCapabilities(
     toolVersion: number,
     capabilities: Capability[]
 ): Promise<void> {
-    const store = await loadPermissions();
-
-    store.permissions[toolName] = {
-        toolName,
-        toolVersion,
-        approvedCapabilities: capabilities,
-        approvedAt: new Date().toISOString()
-    };
-
-    await savePermissions(store);
+    const db = getDb();
+    db.prepare(
+        `INSERT OR REPLACE INTO permissions (tool_name, tool_version, approved_capabilities, approved_at)
+         VALUES (?, ?, ?, ?)`
+    ).run(toolName, toolVersion, JSON.stringify(capabilities), new Date().toISOString());
 }
 
 export async function revokeToolPermissions(toolName: string): Promise<void> {
-    const store = await loadPermissions();
-    delete store.permissions[toolName];
-    await savePermissions(store);
+    const db = getDb();
+    db.prepare("DELETE FROM permissions WHERE tool_name = ?").run(toolName);
 }
 
 export async function listAllPermissions(): Promise<ToolPermission[]> {
-    const store = await loadPermissions();
-    return Object.values(store.permissions);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM permissions").all() as any[];
+    return rows.map(row => ({
+        toolName: row.tool_name,
+        toolVersion: row.tool_version,
+        approvedCapabilities: JSON.parse(row.approved_capabilities),
+        approvedAt: row.approved_at
+    }));
 }
 
 export function isApprovalStale(tool: CustomTool, permission: ToolPermission): boolean {

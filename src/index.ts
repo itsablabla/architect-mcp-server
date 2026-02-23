@@ -1,9 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import { getDb } from "./core/db.js";
 import {
     CustomTool,
     JsonSchema,
@@ -36,7 +34,7 @@ import { getTemplate, listTemplates, formatTemplate } from "./tools/templates.js
 import { executeWithRetry } from "./core/retry.js";
 import { saveVersion, listVersions, getVersion, diffVersions } from "./tools/versioning.js";
 import { runToolTests, formatTestResults } from "./tools/testing.js";
-import { createAlias, deleteAlias, getAlias, listAllAliases, resolveAliasParams } from "./tools/aliases.js";
+import { createAlias, deleteAlias, getAlias, listAllAliases, resolveAlias, resolveAliasParams } from "./tools/aliases.js";
 import { executeBatch, formatBatchResult } from "./execution/batch.js";
 import { createPipeline, getPipeline, deletePipeline, listAllPipelines, executePipeline, formatPipelineResult } from "./execution/pipelines.js";
 import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
@@ -54,9 +52,6 @@ import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, start
 import { getMutationCandidates, getMutationContext } from "./core/mutation.js";
 import { matchIntent } from "./core/intent.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CUSTOM_TOOLS_DIR = path.resolve(__dirname, "..", "custom_tools");
-
 const server = new McpServer({
     name: "architect-mcp-server",
     version: "1.0.0",
@@ -70,52 +65,82 @@ const server = new McpServer({
 
 const registeredTools = new Map<string, CustomTool>();
 
-async function ensureDir(): Promise<void> {
-    try {
-        await fs.access(CUSTOM_TOOLS_DIR);
-    } catch {
-        await fs.mkdir(CUSTOM_TOOLS_DIR, { recursive: true });
-    }
+function toolExists(name: string): boolean {
+    const db = getDb();
+    const row = db.prepare("SELECT name FROM tools WHERE name = ?").get(name);
+    return row !== undefined;
 }
 
-async function getToolFilePath(name: string): Promise<string> {
-    return path.join(CUSTOM_TOOLS_DIR, `${name}.json`);
-}
-
-async function toolExists(name: string): Promise<boolean> {
-    try {
-        await fs.access(await getToolFilePath(name));
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-async function readToolData(name: string): Promise<CustomTool> {
-    const filePath = await getToolFilePath(name);
-    const content = await fs.readFile(filePath, "utf-8");
-    return migrateToolData(JSON.parse(content));
+function readToolData(name: string): CustomTool {
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM tools WHERE name = ?").get(name) as any;
+    if (!row) throw new Error(`Tool '${name}' not found`);
+    return migrateToolData({
+        name: row.name,
+        description: row.description,
+        code: row.code,
+        schema: JSON.parse(row.schema),
+        capabilities: JSON.parse(row.capabilities || "[]"),
+        category: row.category,
+        tags: JSON.parse(row.tags || "[]"),
+        dependencies: JSON.parse(row.dependencies || "[]"),
+        version: row.version,
+        author: row.author || undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        deprecated: row.deprecated === 1 || undefined,
+        failingSince: row.failing_since || undefined,
+        rateLimit: row.rate_limit ? JSON.parse(row.rate_limit) : undefined,
+        cache: row.cache_config ? JSON.parse(row.cache_config) : undefined,
+        retry: row.retry_config ? JSON.parse(row.retry_config) : undefined,
+        tests: row.tests ? JSON.parse(row.tests) : undefined
+    });
 }
 
 async function writeToolData(tool: CustomTool): Promise<void> {
+    const db = getDb();
     try {
-        const existing = await readToolData(tool.name);
+        const existing = readToolData(tool.name);
         await saveVersion(tool.name, existing);
-    } catch {
-    }
-    const filePath = await getToolFilePath(tool.name);
-    await fs.writeFile(filePath, JSON.stringify(tool, null, 2));
+    } catch { }
+    db.prepare(
+        `INSERT OR REPLACE INTO tools
+         (name, description, code, schema, capabilities, category, tags, dependencies, version,
+          author, created_at, updated_at, deprecated, failing_since, rate_limit, cache_config, retry_config, tests)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+        tool.name, tool.description, tool.code,
+        JSON.stringify(tool.schema),
+        JSON.stringify(tool.capabilities || []),
+        tool.category || "other",
+        JSON.stringify(tool.tags || []),
+        JSON.stringify(tool.dependencies || []),
+        tool.version,
+        tool.author || null,
+        tool.createdAt,
+        tool.updatedAt,
+        tool.deprecated ? 1 : 0,
+        tool.failingSince || null,
+        tool.rateLimit ? JSON.stringify(tool.rateLimit) : null,
+        tool.cache ? JSON.stringify(tool.cache) : null,
+        tool.retry ? JSON.stringify(tool.retry) : null,
+        tool.tests ? JSON.stringify(tool.tests) : null
+    );
 }
 
-async function deleteToolFile(name: string): Promise<void> {
-    const filePath = await getToolFilePath(name);
-    await fs.unlink(filePath);
+function deleteToolFile(name: string): void {
+    const db = getDb();
+    db.prepare("DELETE FROM tools WHERE name = ?").run(name);
 }
 
-async function getAllToolFiles(): Promise<string[]> {
-    await ensureDir();
-    const files = await fs.readdir(CUSTOM_TOOLS_DIR);
-    return files.filter(f => f.endsWith(".json"));
+function getAllToolFiles(): string[] {
+    const db = getDb();
+    const rows = db.prepare("SELECT name FROM tools").all() as any[];
+    return rows.map(r => `${r.name}.json`);
+}
+
+function ensureDir(): Promise<void> {
+    return Promise.resolve();
 }
 
 function createToolResponse(text: string): { content: Array<{ type: "text"; text: string }> } {
@@ -1177,12 +1202,12 @@ server.registerTool(
     async ({ name, v1, v2 }) => {
         try {
             const diffs = await diffVersions(name, v1, v2);
-            if (diffs.length === 0) {
+            if (!diffs || diffs.changes.length === 0) {
                 return createToolResponse(`No differences between v${v1} and v${v2}.`);
             }
 
-            const output = diffs.map(d =>
-                `${d.field}:\n  v${v1}: ${JSON.stringify(d.v1Value)}\n  v${v2}: ${JSON.stringify(d.v2Value)}`
+            const output = diffs.changes.map((d: { field: string; from: any; to: any }) =>
+                `${d.field}:\n  v${v1}: ${JSON.stringify(d.from)}\n  v${v2}: ${JSON.stringify(d.to)}`
             ).join("\n\n");
 
             return createToolResponse(`Diff v${v1} vs v${v2} for '${name}':\n\n${output}`);
@@ -1367,7 +1392,7 @@ server.registerTool(
                 return createToolResponse("Invalid preset_params JSON.");
             }
 
-            const entry = await createAlias(alias, target_tool, params, description);
+            const entry = await createAlias({ alias, targetTool: target_tool, presetParams: params, description });
             await logAudit("alias_created", alias, { targetTool: target_tool });
             return createToolResponse(`Alias '${entry.alias}' -> '${entry.targetTool}' created.`);
         } catch (error) {
@@ -1441,8 +1466,11 @@ server.registerTool(
                 return createToolResponse("Invalid params JSON.");
             }
 
-            const mergedParams = resolveAliasParams(aliasEntry, inputParams);
-            const result = await callToolInternal(aliasEntry.targetTool, mergedParams);
+            const resolved = await resolveAlias(alias, inputParams);
+            if (!resolved) {
+                return createToolResponse(`Alias '${alias}' not found.`);
+            }
+            const result = await callToolInternal(resolved.toolName, resolved.mergedParams);
             return createToolResponse(JSON.stringify(result, null, 2));
         } catch (error) {
             return createErrorResponse(error);
@@ -2585,7 +2613,7 @@ server.registerTool(
         try {
             const context = await getMutationContext(
                 tool_name,
-                readToolData,
+                async (name: string) => readToolData(name),
                 getToolStats,
                 (name, limit) => getAuditLogs({ toolName: name, limit })
             );
@@ -2798,8 +2826,8 @@ async function main(): Promise<void> {
     startDashboard(
         3001,
         () => registeredTools,
-        getAllToolFiles,
-        readToolData,
+        async () => getAllToolFiles(),
+        async (name: string) => readToolData(name),
         writeToolData,
         async () => {
             await loadExistingTools();

@@ -1,43 +1,13 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { ScheduleConfig, ScheduleStore, CustomTool } from "../types.js";
+import { ScheduleConfig, CustomTool } from "../types.js";
 import { CronExpressionParser } from "cron-parser";
 import { runToolTests } from "../tools/testing.js";
-import { fileExists } from "../core/utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SCHEDULES_FILE = path.resolve(__dirname, "..", "schedules.json");
-const SCHEDULES_SCHEMA_VERSION = 1;
+import { getDb } from "../core/db.js";
 
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 let schedulerExecutor: ((toolName: string, params: Record<string, unknown>) => Promise<any>) | null = null;
 let deprecationInterval: ReturnType<typeof setInterval> | null = null;
 let deprecationToolReader: (() => Promise<CustomTool[]>) | null = null;
 let deprecationToolWriter: ((tool: CustomTool) => Promise<void>) | null = null;
-
-
-
-export async function loadSchedules(): Promise<ScheduleStore> {
-    if (!await fileExists(SCHEDULES_FILE)) {
-        return { version: SCHEDULES_SCHEMA_VERSION, schedules: {} };
-    }
-
-    try {
-        const content = await fs.readFile(SCHEDULES_FILE, "utf-8");
-        const data = JSON.parse(content) as ScheduleStore;
-        return {
-            version: data.version || SCHEDULES_SCHEMA_VERSION,
-            schedules: data.schedules || {}
-        };
-    } catch {
-        return { version: SCHEDULES_SCHEMA_VERSION, schedules: {} };
-    }
-}
-
-export async function saveSchedules(store: ScheduleStore): Promise<void> {
-    await fs.writeFile(SCHEDULES_FILE, JSON.stringify(store, null, 2));
-}
 
 function calculateNextRun(cron: string): string | undefined {
     try {
@@ -56,14 +26,14 @@ export async function addSchedule(config: {
     params: Record<string, unknown>;
     enabled?: boolean;
 }): Promise<ScheduleConfig> {
-    const store = await loadSchedules();
-    const id = `schedule_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-
     try {
         CronExpressionParser.parse(config.cron);
     } catch {
         throw new Error(`Invalid cron expression: ${config.cron}`);
     }
+
+    const db = getDb();
+    const id = `schedule_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
     const schedule: ScheduleConfig = {
         id,
@@ -75,57 +45,72 @@ export async function addSchedule(config: {
         createdAt: new Date().toISOString()
     };
 
-    store.schedules[id] = schedule;
-    await saveSchedules(store);
+    db.prepare(
+        `INSERT INTO schedules (id, tool_name, cron, params, enabled, next_run, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, schedule.toolName, schedule.cron, JSON.stringify(schedule.params), schedule.enabled ? 1 : 0, schedule.nextRun || null, schedule.createdAt);
+
     return schedule;
 }
 
 export async function removeSchedule(id: string): Promise<boolean> {
-    const store = await loadSchedules();
-    if (!store.schedules[id]) return false;
-    delete store.schedules[id];
-    await saveSchedules(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+    return result.changes > 0;
 }
 
 export async function getSchedule(id: string): Promise<ScheduleConfig | null> {
-    const store = await loadSchedules();
-    return store.schedules[id] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as any;
+    if (!row) return null;
+    return rowToSchedule(row);
 }
 
 export async function listAllSchedules(): Promise<ScheduleConfig[]> {
-    const store = await loadSchedules();
-    return Object.values(store.schedules);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM schedules").all() as any[];
+    return rows.map(rowToSchedule);
+}
+
+function rowToSchedule(row: any): ScheduleConfig {
+    return {
+        id: row.id,
+        toolName: row.tool_name,
+        cron: row.cron,
+        params: JSON.parse(row.params || "{}"),
+        enabled: row.enabled === 1,
+        lastRun: row.last_run || undefined,
+        nextRun: row.next_run || undefined,
+        createdAt: row.created_at
+    };
 }
 
 export async function updateScheduleLastRun(id: string): Promise<void> {
-    const store = await loadSchedules();
-    const schedule = store.schedules[id];
-    if (!schedule) return;
+    const db = getDb();
+    const row = db.prepare("SELECT cron FROM schedules WHERE id = ?").get(id) as any;
+    if (!row) return;
 
-    schedule.lastRun = new Date().toISOString();
-    schedule.nextRun = calculateNextRun(schedule.cron);
-    await saveSchedules(store);
+    const nextRun = calculateNextRun(row.cron);
+    db.prepare("UPDATE schedules SET last_run = ?, next_run = ? WHERE id = ?")
+        .run(new Date().toISOString(), nextRun || null, id);
 }
 
 async function checkAndRunSchedules(): Promise<void> {
     if (!schedulerExecutor) return;
 
-    const store = await loadSchedules();
-    if (Object.keys(store.schedules).length === 0) return;
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM schedules WHERE enabled = 1 AND next_run IS NOT NULL").all() as any[];
+    if (rows.length === 0) return;
     const now = new Date();
 
-    for (const schedule of Object.values(store.schedules)) {
-        if (!schedule.enabled) continue;
-        if (!schedule.nextRun) continue;
-
-        const nextRun = new Date(schedule.nextRun);
+    for (const row of rows) {
+        const nextRun = new Date(row.next_run);
         if (now >= nextRun) {
             try {
-                await schedulerExecutor(schedule.toolName, schedule.params);
+                await schedulerExecutor(row.tool_name, JSON.parse(row.params || "{}"));
             } catch {
             }
-            await updateScheduleLastRun(schedule.id);
+            await updateScheduleLastRun(row.id);
         }
     }
 }

@@ -1,6 +1,8 @@
-import * as vm from "vm";
+import { Worker } from "worker_threads";
 import * as fs from "fs/promises";
 import * as path from "path";
+import * as vm from "vm";
+import { fileURLToPath } from "url";
 import {
     Capability,
     NetCapability,
@@ -9,6 +11,8 @@ import {
     EnvCapability
 } from "../types.js";
 import { createSecretsApi } from "./secrets.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface SandboxOptions {
     memoryLimitMB?: number;
@@ -53,39 +57,6 @@ export interface SandboxResult {
     result?: any;
     error?: string;
     logs: string[];
-}
-
-interface SandboxContext {
-    params: Record<string, unknown>;
-    console: {
-        log: (...args: any[]) => void;
-        error: (...args: any[]) => void;
-        warn: (...args: any[]) => void;
-    };
-    JSON: typeof JSON;
-    Math: typeof Math;
-    Date: typeof Date;
-    Array: typeof Array;
-    Object: typeof Object;
-    String: typeof String;
-    Number: typeof Number;
-    Boolean: typeof Boolean;
-    Promise: typeof Promise;
-    fetch?: (url: string, options?: RequestInit) => Promise<any>;
-    fs?: {
-        readFile?: (filePath: string) => Promise<string>;
-        writeFile?: (filePath: string, content: string) => Promise<void>;
-        readdir?: (dirPath: string) => Promise<string[]>;
-    };
-    exec?: (command: string, args?: string[]) => Promise<{ stdout: string; stderr: string; code: number }>;
-    env?: {
-        get: (name: string) => string | undefined;
-    };
-    callTool?: (name: string, params: Record<string, unknown>) => Promise<any>;
-    setTimeout: typeof setTimeout;
-    clearTimeout: typeof clearTimeout;
-    __resolve: (value: any) => void;
-    __reject: (error: any) => void;
 }
 
 function matchPathPattern(pattern: string, pathname: string): boolean {
@@ -163,7 +134,7 @@ function createNetworkApi(cap: NetCapability): (url: string, options?: RequestIn
     };
 }
 
-function createFilesystemApi(cap: FsCapability): SandboxContext["fs"] {
+function createFilesystemApi(cap: FsCapability) {
     const validatePath = (targetPath: string): void => {
         if (cap.paths && cap.paths.length > 0) {
             const resolved = path.resolve(targetPath);
@@ -179,30 +150,20 @@ function createFilesystemApi(cap: FsCapability): SandboxContext["fs"] {
         }
     };
 
-    const api: SandboxContext["fs"] = {};
-
-    if (cap.mode === "read" || cap.mode === "read_write") {
-        api.readFile = async (filePath: string) => {
-            validatePath(filePath);
-            return fs.readFile(filePath, "utf-8");
-        };
-        api.readdir = async (dirPath: string) => {
-            validatePath(dirPath);
-            return fs.readdir(dirPath);
-        };
-    }
-
-    if (cap.mode === "write" || cap.mode === "read_write") {
-        api.writeFile = async (filePath: string, content: string) => {
-            validatePath(filePath);
-            await fs.writeFile(filePath, content, "utf-8");
-        };
-    }
-
-    return api;
+    return {
+        readFile: cap.mode === "read" || cap.mode === "read_write"
+            ? async (filePath: string) => { validatePath(filePath); return fs.readFile(filePath, "utf-8"); }
+            : undefined,
+        readdir: cap.mode === "read" || cap.mode === "read_write"
+            ? async (dirPath: string) => { validatePath(dirPath); return fs.readdir(dirPath); }
+            : undefined,
+        writeFile: cap.mode === "write" || cap.mode === "read_write"
+            ? async (filePath: string, content: string) => { validatePath(filePath); await fs.writeFile(filePath, content, "utf-8"); }
+            : undefined
+    };
 }
 
-function createChildProcessApi(cap: ChildProcessCapability): SandboxContext["exec"] {
+function createChildProcessApi(cap: ChildProcessCapability) {
     return async (command: string, args: string[] = []) => {
         if (cap.commands && cap.commands.length > 0) {
             if (!cap.commands.includes(command)) {
@@ -243,7 +204,7 @@ function createChildProcessApi(cap: ChildProcessCapability): SandboxContext["exe
     };
 }
 
-function createEnvApi(cap: EnvCapability): SandboxContext["env"] {
+function createEnvApi(cap: EnvCapability) {
     return {
         get: (name: string): string | undefined => {
             if (cap.variables && cap.variables.length > 0) {
@@ -263,6 +224,8 @@ export class ToolSandbox {
     private options: SandboxOptions & { memoryLimitMB: number; timeoutMs: number };
     private logs: string[] = [];
     private originalCode: string = "";
+    private worker: Worker | null = null;
+    private capabilityHandlers: Map<string, any> = new Map();
 
     constructor(options: SandboxOptions) {
         this.options = {
@@ -271,123 +234,163 @@ export class ToolSandbox {
             capabilities: options.capabilities,
             toolCaller: options.toolCaller
         };
+
+        for (const cap of this.options.capabilities) {
+            switch (cap.type) {
+                case "net":
+                    this.capabilityHandlers.set("net", { fetch: createNetworkApi(cap) });
+                    break;
+                case "fs":
+                    this.capabilityHandlers.set("fs", createFilesystemApi(cap));
+                    break;
+                case "child_process":
+                    this.capabilityHandlers.set("child_process", { exec: createChildProcessApi(cap) });
+                    break;
+                case "env":
+                    this.capabilityHandlers.set("env", createEnvApi(cap));
+                    break;
+            }
+        }
+    }
+
+    private async handleCapabilityRequest(msg: any): Promise<any> {
+        const { capType, method, args } = msg;
+
+        if (capType === "secrets") {
+            const secretsApi = createSecretsApi();
+            return secretsApi.get(args[0]);
+        }
+
+        if (capType === "callTool" && this.options.toolCaller) {
+            return this.options.toolCaller(args[0], args[1]);
+        }
+
+        const handler = this.capabilityHandlers.get(capType);
+        if (!handler) {
+            throw new Error(`Capability '${capType}' not approved`);
+        }
+
+        if (capType === "net") {
+            return handler.fetch(...args);
+        }
+        if (capType === "fs") {
+            const fn = handler[method];
+            if (!fn) throw new Error(`Filesystem method '${method}' not permitted`);
+            return fn(...args);
+        }
+        if (capType === "child_process") {
+            return handler.exec(...args);
+        }
+        if (capType === "env") {
+            return handler.get(...args);
+        }
+
+        throw new Error(`Unknown capability type: ${capType}`);
     }
 
     async execute(code: string, params: Record<string, unknown>): Promise<SandboxResult> {
         this.logs = [];
         this.originalCode = code;
 
-        const context: SandboxContext = {
-            params,
-            console: {
-                log: (...args: any[]) => this.logs.push(`[LOG] ${args.map(a => JSON.stringify(a)).join(" ")}`),
-                error: (...args: any[]) => this.logs.push(`[ERROR] ${args.map(a => JSON.stringify(a)).join(" ")}`),
-                warn: (...args: any[]) => this.logs.push(`[WARN] ${args.map(a => JSON.stringify(a)).join(" ")}`)
-            },
-            JSON,
-            Math,
-            Date,
-            Array,
-            Object,
-            String,
-            Number,
-            Boolean,
-            Promise,
-            setTimeout,
-            clearTimeout,
-            __resolve: () => { },
-            __reject: () => { }
-        };
+        const capabilityTypes = this.options.capabilities.map(c => c.type);
+        const workerPath = path.resolve(__dirname, "tool-worker.js");
 
-        for (const cap of this.options.capabilities) {
-            switch (cap.type) {
-                case "net":
-                    context.fetch = createNetworkApi(cap);
-                    break;
-                case "fs":
-                    context.fs = createFilesystemApi(cap);
-                    break;
-                case "child_process":
-                    context.exec = createChildProcessApi(cap);
-                    break;
-                case "env":
-                    context.env = createEnvApi(cap);
-                    break;
-            }
-        }
+        return new Promise<SandboxResult>((resolve) => {
+            let settled = false;
 
-        if (this.options.toolCaller) {
-            context.callTool = this.options.toolCaller;
-        }
-
-        const secretsApi = createSecretsApi();
-        (context as any).secrets = secretsApi;
-
-        const wrappedCode = `
-            (async () => {
-                try {
-                    const __result = await (async (params) => {
-                        ${code}
-                    })(params);
-                    __resolve(__result);
-                } catch (e) {
-                    __reject(e);
-                }
-            })();
-        `;
-
-        try {
-            const vmContext = vm.createContext(context);
-            const script = new vm.Script(wrappedCode);
-
-            const result = await new Promise<any>((resolve, reject) => {
-                let timeoutId: ReturnType<typeof setTimeout>;
-
-                context.__resolve = (val: any) => {
-                    clearTimeout(timeoutId);
-                    resolve(val);
-                };
-                context.__reject = (err: any) => {
-                    clearTimeout(timeoutId);
-                    reject(err);
-                };
-
-                timeoutId = setTimeout(() => {
-                    reject(new Error(`Execution timed out after ${this.options.timeoutMs}ms`));
-                }, this.options.timeoutMs);
-
-                try {
-                    script.runInContext(vmContext, {
-                        timeout: this.options.timeoutMs
-                    });
-                } catch (err) {
-                    clearTimeout(timeoutId);
-                    reject(err);
+            const worker = new Worker(workerPath, {
+                workerData: { code, params, capabilityTypes },
+                resourceLimits: {
+                    maxOldGenerationSizeMb: this.options.memoryLimitMB,
+                    maxYoungGenerationSizeMb: this.options.memoryLimitMB / 4
                 }
             });
 
-            return {
-                success: true,
-                result,
-                logs: this.logs
-            };
-        } catch (error) {
-            let message: string;
-            if (error instanceof Error) {
-                message = formatErrorWithLine(error, this.originalCode);
-            } else {
-                message = String(error);
-            }
-            return {
-                success: false,
-                error: message,
-                logs: this.logs
-            };
-        }
+            this.worker = worker;
+
+            const timeoutId = setTimeout(() => {
+                if (!settled) {
+                    settled = true;
+                    worker.terminate();
+                    resolve({
+                        success: false,
+                        error: `Execution timed out after ${this.options.timeoutMs}ms`,
+                        logs: this.logs
+                    });
+                }
+            }, this.options.timeoutMs);
+
+            worker.on("message", async (msg: any) => {
+                if (msg.type === "capability_request") {
+                    try {
+                        const result = await this.handleCapabilityRequest(msg);
+                        worker.postMessage({
+                            type: "capability_response",
+                            id: msg.id,
+                            result
+                        });
+                    } catch (err) {
+                        worker.postMessage({
+                            type: "capability_response",
+                            id: msg.id,
+                            error: err instanceof Error ? err.message : String(err)
+                        });
+                    }
+                } else if (msg.type === "result") {
+                    if (!settled) {
+                        settled = true;
+                        clearTimeout(timeoutId);
+                        this.logs = msg.logs || [];
+                        if (msg.success) {
+                            resolve({
+                                success: true,
+                                result: msg.result,
+                                logs: this.logs
+                            });
+                        } else {
+                            resolve({
+                                success: false,
+                                error: msg.error,
+                                logs: this.logs
+                            });
+                        }
+                        worker.terminate();
+                    }
+                }
+            });
+
+            worker.on("error", (err: Error) => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timeoutId);
+                    resolve({
+                        success: false,
+                        error: err.message,
+                        logs: this.logs
+                    });
+                }
+            });
+
+            worker.on("exit", (exitCode) => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timeoutId);
+                    resolve({
+                        success: false,
+                        error: `Worker exited unexpectedly with code ${exitCode}`,
+                        logs: this.logs
+                    });
+                }
+            });
+        });
     }
 
     dispose(): void {
         this.logs = [];
+        if (this.worker) {
+            this.worker.terminate();
+            this.worker = null;
+        }
     }
 }
 

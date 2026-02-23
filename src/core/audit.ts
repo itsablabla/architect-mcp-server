@@ -1,10 +1,4 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUDIT_LOG_FILE = path.resolve(__dirname, "..", "audit.log");
-const MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024;
+import { getDb } from "./db.js";
 
 export type AuditAction =
     | "tool_created"
@@ -54,46 +48,23 @@ export interface AuditEntry {
     duration?: number;
 }
 
-async function ensureLogFile(): Promise<void> {
-    try {
-        await fs.access(AUDIT_LOG_FILE);
-    } catch {
-        await fs.writeFile(AUDIT_LOG_FILE, "");
-    }
-}
-
-async function rotateLogIfNeeded(): Promise<void> {
-    try {
-        const stats = await fs.stat(AUDIT_LOG_FILE);
-        if (stats.size > MAX_LOG_SIZE_BYTES) {
-            const backupPath = AUDIT_LOG_FILE.replace(".log", `.${Date.now()}.log`);
-            await fs.rename(AUDIT_LOG_FILE, backupPath);
-            await fs.writeFile(AUDIT_LOG_FILE, "");
-        }
-    } catch {
-        // Ignore errors
-    }
-}
-
 export async function logAudit(
     action: AuditAction,
     toolName: string,
     details?: Record<string, any>,
     duration?: number
 ): Promise<void> {
-    await ensureLogFile();
-    await rotateLogIfNeeded();
-
-    const entry: AuditEntry = {
-        timestamp: new Date().toISOString(),
+    const db = getDb();
+    db.prepare(
+        `INSERT INTO audit_log (timestamp, action, tool_name, details, duration_ms)
+         VALUES (?, ?, ?, ?, ?)`
+    ).run(
+        new Date().toISOString(),
         action,
         toolName,
-        ...(details && { details }),
-        ...(duration !== undefined && { duration })
-    };
-
-    const line = JSON.stringify(entry) + "\n";
-    await fs.appendFile(AUDIT_LOG_FILE, line);
+        details ? JSON.stringify(details) : null,
+        duration ?? null
+    );
 }
 
 export async function getAuditLogs(
@@ -104,43 +75,45 @@ export async function getAuditLogs(
         since?: string;
     } = {}
 ): Promise<AuditEntry[]> {
-    await ensureLogFile();
-
-    const content = await fs.readFile(AUDIT_LOG_FILE, "utf-8");
-    const lines = content.trim().split("\n").filter(Boolean);
-
-    let entries: AuditEntry[] = lines.map(line => {
-        try {
-            return JSON.parse(line);
-        } catch {
-            return null;
-        }
-    }).filter((e): e is AuditEntry => e !== null);
+    const db = getDb();
+    let sql = "SELECT * FROM audit_log WHERE 1=1";
+    const params: any[] = [];
 
     if (options.toolName) {
-        entries = entries.filter(e => e.toolName === options.toolName);
+        sql += " AND tool_name = ?";
+        params.push(options.toolName);
     }
 
     if (options.action) {
-        entries = entries.filter(e => e.action === options.action);
+        sql += " AND action = ?";
+        params.push(options.action);
     }
 
     if (options.since) {
-        const sinceDate = new Date(options.since);
-        entries = entries.filter(e => new Date(e.timestamp) >= sinceDate);
+        sql += " AND timestamp >= ?";
+        params.push(options.since);
     }
 
-    entries.reverse();
+    sql += " ORDER BY id DESC";
 
     if (options.limit) {
-        entries = entries.slice(0, options.limit);
+        sql += " LIMIT ?";
+        params.push(options.limit);
     }
 
-    return entries;
+    const rows = db.prepare(sql).all(...params) as any[];
+    return rows.map(row => ({
+        timestamp: row.timestamp,
+        action: row.action as AuditAction,
+        toolName: row.tool_name,
+        details: row.details ? JSON.parse(row.details) : undefined,
+        duration: row.duration_ms ?? undefined
+    }));
 }
 
 export async function clearAuditLogs(): Promise<void> {
-    await fs.writeFile(AUDIT_LOG_FILE, "");
+    const db = getDb();
+    db.prepare("DELETE FROM audit_log").run();
 }
 
 export function formatAuditEntry(entry: AuditEntry): string {

@@ -1,41 +1,23 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import * as crypto from "crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { WebhookConfig, WebhookStore } from "../types.js";
-import { fileExists } from "../core/utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WEBHOOKS_FILE = path.resolve(__dirname, "..", "webhooks.json");
-const WEBHOOKS_SCHEMA_VERSION = 1;
+import { WebhookConfig } from "../types.js";
+import { getDb } from "../core/db.js";
 
 let webhookServer: ReturnType<typeof serve> | null = null;
 let webhookApp: Hono | null = null;
 let webhookExecutor: ((toolName: string, params: Record<string, unknown>) => Promise<any>) | null = null;
 
-
-
-export async function loadWebhooks(): Promise<WebhookStore> {
-    if (!await fileExists(WEBHOOKS_FILE)) {
-        return { version: WEBHOOKS_SCHEMA_VERSION, webhooks: {} };
-    }
-
-    try {
-        const content = await fs.readFile(WEBHOOKS_FILE, "utf-8");
-        const data = JSON.parse(content) as WebhookStore;
-        return {
-            version: data.version || WEBHOOKS_SCHEMA_VERSION,
-            webhooks: data.webhooks || {}
-        };
-    } catch {
-        return { version: WEBHOOKS_SCHEMA_VERSION, webhooks: {} };
-    }
-}
-
-export async function saveWebhooks(store: WebhookStore): Promise<void> {
-    await fs.writeFile(WEBHOOKS_FILE, JSON.stringify(store, null, 2));
+function rowToWebhook(row: any): WebhookConfig {
+    return {
+        id: row.id,
+        toolName: row.tool_name,
+        path: row.path,
+        method: row.method,
+        secret: row.secret || undefined,
+        enabled: row.enabled === 1,
+        createdAt: row.created_at
+    };
 }
 
 export async function createWebhook(config: {
@@ -44,7 +26,7 @@ export async function createWebhook(config: {
     method: "GET" | "POST";
     secret?: string;
 }): Promise<WebhookConfig> {
-    const store = await loadWebhooks();
+    const db = getDb();
     const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
     let webhookPath = config.path;
@@ -62,22 +44,24 @@ export async function createWebhook(config: {
         createdAt: new Date().toISOString()
     };
 
-    store.webhooks[id] = webhook;
-    await saveWebhooks(store);
+    db.prepare(
+        `INSERT INTO webhooks (id, tool_name, path, method, secret, enabled, created_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?)`
+    ).run(id, webhook.toolName, webhook.path, webhook.method, webhook.secret || null, webhook.createdAt);
+
     return webhook;
 }
 
 export async function deleteWebhook(id: string): Promise<boolean> {
-    const store = await loadWebhooks();
-    if (!store.webhooks[id]) return false;
-    delete store.webhooks[id];
-    await saveWebhooks(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM webhooks WHERE id = ?").run(id);
+    return result.changes > 0;
 }
 
 export async function listAllWebhooks(): Promise<WebhookConfig[]> {
-    const store = await loadWebhooks();
-    return Object.values(store.webhooks);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM webhooks").all() as any[];
+    return rows.map(rowToWebhook);
 }
 
 async function handleWebhookRequest(
@@ -90,18 +74,16 @@ async function handleWebhookRequest(
         return { status: 503, body: { error: "Webhook executor not initialized" } };
     }
 
-    const store = await loadWebhooks();
-    const webhook = Object.values(store.webhooks).find(
-        w => w.path === webhookPath && w.method === method && w.enabled
-    );
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM webhooks WHERE path = ? AND method = ? AND enabled = 1").get(webhookPath, method) as any;
 
-    if (!webhook) {
+    if (!row) {
         return { status: 404, body: { error: "Webhook not found" } };
     }
 
-    if (webhook.secret) {
+    if (row.secret) {
         const providedSecret = headers["x-webhook-secret"] || "";
-        const expected = Buffer.from(webhook.secret);
+        const expected = Buffer.from(row.secret);
         const provided = Buffer.from(providedSecret);
         if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
             return { status: 401, body: { error: "Invalid webhook secret" } };
@@ -110,7 +92,7 @@ async function handleWebhookRequest(
 
     try {
         const params = typeof body === "object" && body !== null ? body : {};
-        const result = await webhookExecutor(webhook.toolName, params);
+        const result = await webhookExecutor(row.tool_name, params);
         return { status: 200, body: { success: true, result } };
     } catch (err) {
         return {

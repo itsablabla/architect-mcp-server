@@ -1,53 +1,21 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import {
-    ExecutionHistoryStore,
     ExecutionStats,
-    RateLimitConfig,
-    RateLimitState
+    RateLimitConfig
 } from "../types.js";
-import { fileExists } from "./utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const HISTORY_FILE = path.resolve(__dirname, "..", "execution_history.json");
-const HISTORY_SCHEMA_VERSION = 1;
-
-
-
-export async function loadHistory(): Promise<ExecutionHistoryStore> {
-    if (!await fileExists(HISTORY_FILE)) {
-        return {
-            version: HISTORY_SCHEMA_VERSION,
-            stats: {},
-            rateLimitState: {}
-        };
-    }
-
-    try {
-        const content = await fs.readFile(HISTORY_FILE, "utf-8");
-        const data = JSON.parse(content) as ExecutionHistoryStore;
-        return {
-            version: data.version || HISTORY_SCHEMA_VERSION,
-            stats: data.stats || {},
-            rateLimitState: data.rateLimitState || {}
-        };
-    } catch {
-        return {
-            version: HISTORY_SCHEMA_VERSION,
-            stats: {},
-            rateLimitState: {}
-        };
-    }
-}
-
-export async function saveHistory(store: ExecutionHistoryStore): Promise<void> {
-    await fs.writeFile(HISTORY_FILE, JSON.stringify(store, null, 2));
-}
+import { getDb } from "./db.js";
 
 export async function getToolStats(toolName: string): Promise<ExecutionStats | null> {
-    const store = await loadHistory();
-    return store.stats[toolName] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM execution_stats WHERE tool_name = ?").get(toolName) as any;
+    if (!row) return null;
+    return {
+        totalCalls: row.total_calls,
+        successfulCalls: row.successful_calls,
+        failedCalls: row.failed_calls,
+        totalDurationMs: row.total_duration_ms,
+        averageDurationMs: row.average_duration_ms,
+        lastExecutedAt: row.last_executed_at || undefined
+    };
 }
 
 export async function recordExecution(
@@ -55,31 +23,33 @@ export async function recordExecution(
     success: boolean,
     durationMs: number
 ): Promise<void> {
-    const store = await loadHistory();
+    const db = getDb();
+    const existing = db.prepare("SELECT * FROM execution_stats WHERE tool_name = ?").get(toolName) as any;
 
-    if (!store.stats[toolName]) {
-        store.stats[toolName] = {
-            totalCalls: 0,
-            successfulCalls: 0,
-            failedCalls: 0,
-            totalDurationMs: 0,
-            averageDurationMs: 0
-        };
-    }
-
-    const stats = store.stats[toolName];
-    stats.totalCalls++;
-    stats.totalDurationMs += durationMs;
-    stats.averageDurationMs = Math.round(stats.totalDurationMs / stats.totalCalls);
-    stats.lastExecutedAt = new Date().toISOString();
-
-    if (success) {
-        stats.successfulCalls++;
+    if (!existing) {
+        const avgMs = Math.round(durationMs);
+        db.prepare(
+            `INSERT INTO execution_stats (tool_name, total_calls, successful_calls, failed_calls, total_duration_ms, average_duration_ms, last_executed_at)
+             VALUES (?, 1, ?, ?, ?, ?, ?)`
+        ).run(toolName, success ? 1 : 0, success ? 0 : 1, durationMs, avgMs, new Date().toISOString());
     } else {
-        stats.failedCalls++;
+        const totalCalls = existing.total_calls + 1;
+        const totalDuration = existing.total_duration_ms + durationMs;
+        const avgMs = Math.round(totalDuration / totalCalls);
+        db.prepare(
+            `UPDATE execution_stats
+             SET total_calls = ?, successful_calls = ?, failed_calls = ?,
+                 total_duration_ms = ?, average_duration_ms = ?, last_executed_at = ?
+             WHERE tool_name = ?`
+        ).run(
+            totalCalls,
+            existing.successful_calls + (success ? 1 : 0),
+            existing.failed_calls + (success ? 0 : 1),
+            totalDuration, avgMs,
+            new Date().toISOString(),
+            toolName
+        );
     }
-
-    await saveHistory(store);
 }
 
 export async function checkRateLimit(
@@ -90,31 +60,34 @@ export async function checkRateLimit(
         return { allowed: true };
     }
 
-    const store = await loadHistory();
+    const db = getDb();
     const now = Date.now();
     const oneMinuteAgo = now - 60 * 1000;
     const oneHourAgo = now - 60 * 60 * 1000;
 
-    if (!store.rateLimitState[toolName]) {
-        store.rateLimitState[toolName] = {
-            minuteCalls: [],
-            hourCalls: []
-        };
+    let row = db.prepare("SELECT * FROM rate_limit_state WHERE tool_name = ?").get(toolName) as any;
+    if (!row) {
+        db.prepare("INSERT INTO rate_limit_state (tool_name, minute_calls, hour_calls) VALUES (?, '[]', '[]')").run(toolName);
+        return { allowed: true };
     }
 
-    const state = store.rateLimitState[toolName];
+    let minuteCalls: number[] = JSON.parse(row.minute_calls || "[]");
+    let hourCalls: number[] = JSON.parse(row.hour_calls || "[]");
 
-    state.minuteCalls = state.minuteCalls.filter(t => t > oneMinuteAgo);
-    state.hourCalls = state.hourCalls.filter(t => t > oneHourAgo);
+    minuteCalls = minuteCalls.filter(t => t > oneMinuteAgo);
+    hourCalls = hourCalls.filter(t => t > oneHourAgo);
 
-    if (state.minuteCalls.length >= config.maxCallsPerMinute) {
+    db.prepare("UPDATE rate_limit_state SET minute_calls = ?, hour_calls = ? WHERE tool_name = ?")
+        .run(JSON.stringify(minuteCalls), JSON.stringify(hourCalls), toolName);
+
+    if (minuteCalls.length >= config.maxCallsPerMinute) {
         return {
             allowed: false,
             reason: `Rate limit exceeded: ${config.maxCallsPerMinute} calls per minute`
         };
     }
 
-    if (state.hourCalls.length >= config.maxCallsPerHour) {
+    if (hourCalls.length >= config.maxCallsPerHour) {
         return {
             allowed: false,
             reason: `Rate limit exceeded: ${config.maxCallsPerHour} calls per hour`
@@ -125,40 +98,52 @@ export async function checkRateLimit(
 }
 
 export async function recordRateLimitCall(toolName: string): Promise<void> {
-    const store = await loadHistory();
+    const db = getDb();
     const now = Date.now();
 
-    if (!store.rateLimitState[toolName]) {
-        store.rateLimitState[toolName] = {
-            minuteCalls: [],
-            hourCalls: []
-        };
+    let row = db.prepare("SELECT * FROM rate_limit_state WHERE tool_name = ?").get(toolName) as any;
+    if (!row) {
+        db.prepare("INSERT INTO rate_limit_state (tool_name, minute_calls, hour_calls) VALUES (?, ?, ?)")
+            .run(toolName, JSON.stringify([now]), JSON.stringify([now]));
+        return;
     }
 
-    store.rateLimitState[toolName].minuteCalls.push(now);
-    store.rateLimitState[toolName].hourCalls.push(now);
+    const minuteCalls: number[] = JSON.parse(row.minute_calls || "[]");
+    const hourCalls: number[] = JSON.parse(row.hour_calls || "[]");
+    minuteCalls.push(now);
+    hourCalls.push(now);
 
-    await saveHistory(store);
+    db.prepare("UPDATE rate_limit_state SET minute_calls = ?, hour_calls = ? WHERE tool_name = ?")
+        .run(JSON.stringify(minuteCalls), JSON.stringify(hourCalls), toolName);
 }
 
 export async function getAllStats(): Promise<Record<string, ExecutionStats>> {
-    const store = await loadHistory();
-    return store.stats;
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM execution_stats").all() as any[];
+    const result: Record<string, ExecutionStats> = {};
+    for (const row of rows) {
+        result[row.tool_name] = {
+            totalCalls: row.total_calls,
+            successfulCalls: row.successful_calls,
+            failedCalls: row.failed_calls,
+            totalDurationMs: row.total_duration_ms,
+            averageDurationMs: row.average_duration_ms,
+            lastExecutedAt: row.last_executed_at || undefined
+        };
+    }
+    return result;
 }
 
 export async function clearToolStats(toolName: string): Promise<void> {
-    const store = await loadHistory();
-    delete store.stats[toolName];
-    delete store.rateLimitState[toolName];
-    await saveHistory(store);
+    const db = getDb();
+    db.prepare("DELETE FROM execution_stats WHERE tool_name = ?").run(toolName);
+    db.prepare("DELETE FROM rate_limit_state WHERE tool_name = ?").run(toolName);
 }
 
 export async function clearAllStats(): Promise<void> {
-    await saveHistory({
-        version: HISTORY_SCHEMA_VERSION,
-        stats: {},
-        rateLimitState: {}
-    });
+    const db = getDb();
+    db.prepare("DELETE FROM execution_stats").run();
+    db.prepare("DELETE FROM rate_limit_state").run();
 }
 
 export function formatStats(stats: ExecutionStats): string {

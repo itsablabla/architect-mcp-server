@@ -1,29 +1,25 @@
+import * as crypto from "crypto";
 import * as fs from "fs/promises";
 import * as path from "path";
-import * as crypto from "crypto";
 import { fileURLToPath } from "url";
-import { SecretEntry, SecretsStore } from "../types.js";
-import { fileExists } from "./utils.js";
+import { getDb } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SECRETS_FILE = path.resolve(__dirname, "..", "secrets.json");
 const KEY_FILE = path.resolve(__dirname, "..", ".secrets.key");
-const SECRETS_SCHEMA_VERSION = 1;
 const ALGORITHM = "aes-256-gcm";
 
 let cachedKey: Buffer | null = null;
-
-
 
 async function getOrCreateKey(): Promise<Buffer> {
     if (cachedKey) {
         return cachedKey;
     }
 
-    if (await fileExists(KEY_FILE)) {
+    try {
         const keyHex = await fs.readFile(KEY_FILE, "utf-8");
         cachedKey = Buffer.from(keyHex.trim(), "hex");
         return cachedKey;
+    } catch {
     }
 
     cachedKey = crypto.randomBytes(32);
@@ -52,84 +48,47 @@ function decrypt(encryptedData: string, iv: string, key: Buffer): string {
     return decrypted;
 }
 
-export async function loadSecrets(): Promise<SecretsStore> {
-    if (!await fileExists(SECRETS_FILE)) {
-        return {
-            version: SECRETS_SCHEMA_VERSION,
-            secrets: {}
-        };
-    }
-
-    try {
-        const content = await fs.readFile(SECRETS_FILE, "utf-8");
-        const data = JSON.parse(content) as SecretsStore;
-        return {
-            version: data.version || SECRETS_SCHEMA_VERSION,
-            secrets: data.secrets || {}
-        };
-    } catch {
-        return {
-            version: SECRETS_SCHEMA_VERSION,
-            secrets: {}
-        };
-    }
-}
-
-export async function saveSecrets(store: SecretsStore): Promise<void> {
-    await fs.writeFile(SECRETS_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
-}
-
 export async function setSecret(name: string, value: string): Promise<void> {
     const key = await getOrCreateKey();
-    const store = await loadSecrets();
     const { encrypted, iv } = encrypt(value, key);
     const now = new Date().toISOString();
+    const db = getDb();
 
-    store.secrets[name] = {
-        name,
-        encryptedValue: encrypted,
-        iv,
-        createdAt: store.secrets[name]?.createdAt || now,
-        updatedAt: now
-    };
+    const existing = db.prepare("SELECT created_at FROM secrets WHERE name = ?").get(name) as any;
+    const createdAt = existing?.created_at || now;
 
-    await saveSecrets(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO secrets (name, encrypted_value, iv, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`
+    ).run(name, encrypted, iv, createdAt, now);
 }
 
 export async function getSecret(name: string): Promise<string | null> {
-    const store = await loadSecrets();
-    const entry = store.secrets[name];
-
-    if (!entry) {
-        return null;
-    }
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM secrets WHERE name = ?").get(name) as any;
+    if (!row) return null;
 
     try {
         const key = await getOrCreateKey();
-        return decrypt(entry.encryptedValue, entry.iv, key);
+        return decrypt(row.encrypted_value, row.iv, key);
     } catch {
         return null;
     }
 }
 
 export async function deleteSecret(name: string): Promise<boolean> {
-    const store = await loadSecrets();
-
-    if (!store.secrets[name]) {
-        return false;
-    }
-
-    delete store.secrets[name];
-    await saveSecrets(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM secrets WHERE name = ?").run(name);
+    return result.changes > 0;
 }
 
 export async function listSecrets(): Promise<Array<{ name: string; createdAt: string; updatedAt: string }>> {
-    const store = await loadSecrets();
-    return Object.values(store.secrets).map(s => ({
-        name: s.name,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt
+    const db = getDb();
+    const rows = db.prepare("SELECT name, created_at, updated_at FROM secrets").all() as any[];
+    return rows.map(row => ({
+        name: row.name,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
     }));
 }
 

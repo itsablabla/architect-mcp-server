@@ -1,34 +1,5 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { MemoryEntry, MemoryStore } from "../types.js";
-import { fileExists } from "./utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MEMORY_FILE = path.resolve(__dirname, "..", "memory.json");
-const MEMORY_SCHEMA_VERSION = 1;
-
-
-
-async function loadMemory(): Promise<MemoryStore> {
-    if (!await fileExists(MEMORY_FILE)) {
-        return { version: MEMORY_SCHEMA_VERSION, entries: {} };
-    }
-    try {
-        const content = await fs.readFile(MEMORY_FILE, "utf-8");
-        const data = JSON.parse(content) as MemoryStore;
-        return {
-            version: data.version || MEMORY_SCHEMA_VERSION,
-            entries: data.entries || {}
-        };
-    } catch {
-        return { version: MEMORY_SCHEMA_VERSION, entries: {} };
-    }
-}
-
-async function saveMemory(store: MemoryStore): Promise<void> {
-    await fs.writeFile(MEMORY_FILE, JSON.stringify(store, null, 2));
-}
+import { MemoryEntry } from "../types.js";
+import { getDb } from "./db.js";
 
 function makeKey(namespace: string, key: string): string {
     return `${namespace}::${key}`;
@@ -40,88 +11,73 @@ export async function setMemory(
     namespace: string = "default",
     ttlSeconds?: number
 ): Promise<void> {
-    const store = await loadMemory();
+    const db = getDb();
     const now = new Date().toISOString();
     const expiresAt = ttlSeconds
         ? new Date(Date.now() + ttlSeconds * 1000).toISOString()
-        : undefined;
+        : null;
+    const storeKey = makeKey(namespace, key);
 
-    store.entries[makeKey(namespace, key)] = {
-        key,
-        namespace,
-        value,
-        createdAt: store.entries[makeKey(namespace, key)]?.createdAt || now,
-        updatedAt: now,
-        expiresAt
-    };
+    const existing = db.prepare("SELECT created_at FROM memory WHERE store_key = ?").get(storeKey) as any;
+    const createdAt = existing?.created_at || now;
 
-    await saveMemory(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO memory (store_key, namespace, key, value, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(storeKey, namespace, key, value, createdAt, now, expiresAt);
 }
 
 export async function getMemory(key: string, namespace: string = "default"): Promise<string | null> {
-    const store = await loadMemory();
-    const entry = store.entries[makeKey(namespace, key)];
-    if (!entry) return null;
+    const db = getDb();
+    const storeKey = makeKey(namespace, key);
+    const row = db.prepare("SELECT * FROM memory WHERE store_key = ?").get(storeKey) as any;
+    if (!row) return null;
 
-    if (entry.expiresAt && new Date(entry.expiresAt) < new Date()) {
-        delete store.entries[makeKey(namespace, key)];
-        await saveMemory(store);
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+        db.prepare("DELETE FROM memory WHERE store_key = ?").run(storeKey);
         return null;
     }
 
-    return entry.value;
+    return row.value;
 }
 
 export async function deleteMemory(key: string, namespace: string = "default"): Promise<boolean> {
-    const store = await loadMemory();
+    const db = getDb();
     const storeKey = makeKey(namespace, key);
-    if (!store.entries[storeKey]) return false;
-    delete store.entries[storeKey];
-    await saveMemory(store);
-    return true;
+    const result = db.prepare("DELETE FROM memory WHERE store_key = ?").run(storeKey);
+    return result.changes > 0;
 }
 
 export async function listMemory(namespace?: string): Promise<MemoryEntry[]> {
-    const store = await loadMemory();
+    const db = getDb();
     const now = new Date();
-    const expired: string[] = [];
-    const results: MemoryEntry[] = [];
 
-    for (const [storeKey, entry] of Object.entries(store.entries)) {
-        if (entry.expiresAt && new Date(entry.expiresAt) < now) {
-            expired.push(storeKey);
-            continue;
-        }
-        if (namespace && entry.namespace !== namespace) continue;
-        results.push(entry);
+    db.prepare("DELETE FROM memory WHERE expires_at IS NOT NULL AND expires_at < ?").run(now.toISOString());
+
+    let rows: any[];
+    if (namespace) {
+        rows = db.prepare("SELECT * FROM memory WHERE namespace = ?").all(namespace) as any[];
+    } else {
+        rows = db.prepare("SELECT * FROM memory").all() as any[];
     }
 
-    if (expired.length > 0) {
-        for (const k of expired) delete store.entries[k];
-        await saveMemory(store);
-    }
-
-    return results;
+    return rows.map(row => ({
+        key: row.key,
+        namespace: row.namespace,
+        value: row.value,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        expiresAt: row.expires_at || undefined
+    }));
 }
 
 export async function clearMemory(namespace?: string): Promise<number> {
-    const store = await loadMemory();
-    let count = 0;
-
+    const db = getDb();
+    let result;
     if (!namespace) {
-        count = Object.keys(store.entries).length;
-        store.entries = {};
+        result = db.prepare("DELETE FROM memory").run();
     } else {
-        for (const [storeKey, entry] of Object.entries(store.entries)) {
-            if (entry.namespace === namespace) {
-                delete store.entries[storeKey];
-                count++;
-            }
-        }
+        result = db.prepare("DELETE FROM memory WHERE namespace = ?").run(namespace);
     }
-
-    await saveMemory(store);
-    return count;
+    return result.changes;
 }
-
-

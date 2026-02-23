@@ -1,35 +1,5 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { CustomResource, ResourceStore } from "../types.js";
-import { fileExists } from "../core/utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RESOURCES_FILE = path.resolve(__dirname, "..", "resources.json");
-const RESOURCES_SCHEMA_VERSION = 1;
-
-
-
-export async function loadResources(): Promise<ResourceStore> {
-    if (!await fileExists(RESOURCES_FILE)) {
-        return { version: RESOURCES_SCHEMA_VERSION, resources: {} };
-    }
-
-    try {
-        const content = await fs.readFile(RESOURCES_FILE, "utf-8");
-        const data = JSON.parse(content) as ResourceStore;
-        return {
-            version: data.version || RESOURCES_SCHEMA_VERSION,
-            resources: data.resources || {}
-        };
-    } catch {
-        return { version: RESOURCES_SCHEMA_VERSION, resources: {} };
-    }
-}
-
-export async function saveResources(store: ResourceStore): Promise<void> {
-    await fs.writeFile(RESOURCES_FILE, JSON.stringify(store, null, 2));
-}
+import { CustomResource } from "../types.js";
+import { getDb } from "../core/db.js";
 
 export async function createResource(resource: {
     uri: string;
@@ -38,36 +8,43 @@ export async function createResource(resource: {
     mimeType: string;
     content: string;
 }): Promise<CustomResource> {
-    const store = await loadResources();
+    const db = getDb();
     const now = new Date().toISOString();
+
+    const existing = db.prepare("SELECT created_at FROM resources WHERE uri = ?").get(resource.uri) as any;
+    const createdAt = existing?.created_at || now;
 
     const entry: CustomResource = {
         ...resource,
-        createdAt: store.resources[resource.uri]?.createdAt || now,
+        createdAt,
         updatedAt: now
     };
 
-    store.resources[resource.uri] = entry;
-    await saveResources(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO resources (uri, name, description, mime_type, content, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(resource.uri, resource.name, resource.description, resource.mimeType, resource.content, createdAt, now);
+
     return entry;
 }
 
 export async function getResource(uri: string): Promise<CustomResource | null> {
-    const store = await loadResources();
-    return store.resources[uri] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM resources WHERE uri = ?").get(uri) as any;
+    if (!row) return null;
+    return rowToResource(row);
 }
 
 export async function deleteResource(uri: string): Promise<boolean> {
-    const store = await loadResources();
-    if (!store.resources[uri]) return false;
-    delete store.resources[uri];
-    await saveResources(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM resources WHERE uri = ?").run(uri);
+    return result.changes > 0;
 }
 
 export async function listAllResources(): Promise<CustomResource[]> {
-    const store = await loadResources();
-    return Object.values(store.resources);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM resources").all() as any[];
+    return rows.map(rowToResource);
 }
 
 export function formatResource(resource: CustomResource): string {
@@ -78,4 +55,23 @@ export function formatResource(resource: CustomResource): string {
         `  Description: ${resource.description}`,
         `  Content Length: ${resource.content.length} chars`
     ].join("\n");
+}
+
+function rowToResource(row: any): CustomResource {
+    return {
+        uri: row.uri,
+        name: row.name,
+        description: row.description,
+        mimeType: row.mime_type,
+        content: row.content,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+    };
+}
+
+export async function loadResources() {
+    return { version: 1, resources: {} };
+}
+
+export async function saveResources(_store: any) {
 }

@@ -1,35 +1,5 @@
-import * as fs from "fs/promises";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { CustomPrompt, PromptStore, PromptArgument } from "../types.js";
-import { fileExists } from "../core/utils.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROMPTS_FILE = path.resolve(__dirname, "..", "prompts.json");
-const PROMPTS_SCHEMA_VERSION = 1;
-
-
-
-export async function loadPrompts(): Promise<PromptStore> {
-    if (!await fileExists(PROMPTS_FILE)) {
-        return { version: PROMPTS_SCHEMA_VERSION, prompts: {} };
-    }
-
-    try {
-        const content = await fs.readFile(PROMPTS_FILE, "utf-8");
-        const data = JSON.parse(content) as PromptStore;
-        return {
-            version: data.version || PROMPTS_SCHEMA_VERSION,
-            prompts: data.prompts || {}
-        };
-    } catch {
-        return { version: PROMPTS_SCHEMA_VERSION, prompts: {} };
-    }
-}
-
-export async function savePrompts(store: PromptStore): Promise<void> {
-    await fs.writeFile(PROMPTS_FILE, JSON.stringify(store, null, 2));
-}
+import { CustomPrompt, PromptArgument } from "../types.js";
+import { getDb } from "../core/db.js";
 
 export async function createPrompt(prompt: {
     name: string;
@@ -37,36 +7,43 @@ export async function createPrompt(prompt: {
     arguments: PromptArgument[];
     template: string;
 }): Promise<CustomPrompt> {
-    const store = await loadPrompts();
+    const db = getDb();
     const now = new Date().toISOString();
+
+    const existing = db.prepare("SELECT created_at FROM prompts WHERE name = ?").get(prompt.name) as any;
+    const createdAt = existing?.created_at || now;
 
     const entry: CustomPrompt = {
         ...prompt,
-        createdAt: store.prompts[prompt.name]?.createdAt || now,
+        createdAt,
         updatedAt: now
     };
 
-    store.prompts[prompt.name] = entry;
-    await savePrompts(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO prompts (name, description, arguments, template, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(prompt.name, prompt.description, JSON.stringify(prompt.arguments), prompt.template, createdAt, now);
+
     return entry;
 }
 
 export async function getPrompt(name: string): Promise<CustomPrompt | null> {
-    const store = await loadPrompts();
-    return store.prompts[name] || null;
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM prompts WHERE name = ?").get(name) as any;
+    if (!row) return null;
+    return rowToPrompt(row);
 }
 
 export async function deletePrompt(name: string): Promise<boolean> {
-    const store = await loadPrompts();
-    if (!store.prompts[name]) return false;
-    delete store.prompts[name];
-    await savePrompts(store);
-    return true;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM prompts WHERE name = ?").run(name);
+    return result.changes > 0;
 }
 
 export async function listAllPrompts(): Promise<CustomPrompt[]> {
-    const store = await loadPrompts();
-    return Object.values(store.prompts);
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM prompts").all() as any[];
+    return rows.map(rowToPrompt);
 }
 
 export function renderPrompt(
@@ -98,4 +75,22 @@ export function formatPrompt(prompt: CustomPrompt): string {
         args || "    (none)",
         `  Template: ${prompt.template.substring(0, 100)}${prompt.template.length > 100 ? "..." : ""}`
     ].join("\n");
+}
+
+function rowToPrompt(row: any): CustomPrompt {
+    return {
+        name: row.name,
+        description: row.description,
+        arguments: JSON.parse(row.arguments || "[]"),
+        template: row.template,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+    };
+}
+
+export async function loadPrompts() {
+    return { version: 1, prompts: {} };
+}
+
+export async function savePrompts(_store: any) {
 }
