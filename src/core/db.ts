@@ -4,12 +4,13 @@ import * as fs from "fs";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.resolve(__dirname, "..", "architect.db");
+const DB_PATH = path.resolve(__dirname, "..", "..", "data", "architect.db");
 
 let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
     if (!_db) {
+        fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
         _db = new Database(DB_PATH);
         _db.pragma("journal_mode = WAL");
         _db.pragma("foreign_keys = ON");
