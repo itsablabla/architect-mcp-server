@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { getAllStats } from "../core/history.js";
 import { getAuditLogs, logAudit } from "../core/audit.js";
-import { listAllPermissions } from "../core/permissions.js";
+import { listAllPermissions, approveToolCapabilities } from "../core/permissions.js";
 import { getCacheStats, clearAllCache, clearCacheForTool } from "../core/cache.js";
 import { listSecrets } from "../core/secrets.js";
 import { listMemory, clearMemory, setMemory, deleteMemory } from "../core/memory.js";
@@ -22,7 +22,7 @@ import { listAllPrompts } from "../mcp/prompts.js";
 import { CustomTool } from "../types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DASHBOARD_DIR = path.resolve(__dirname, "..", "dashboard");
+const DASHBOARD_DIR = path.resolve(__dirname, "..", "..", "dashboard");
 
 let dashboardServer: ReturnType<typeof serve> | null = null;
 
@@ -221,6 +221,53 @@ export function startDashboard(
                     durationMs
                 });
             }
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.post("/api/tools/:name/approve", async (c) => {
+        try {
+            const name = c.req.param("name");
+            let tool: CustomTool;
+            try {
+                tool = await readToolData(name);
+            } catch {
+                return c.json({ error: `Tool '${name}' not found` }, 404);
+            }
+
+            await approveToolCapabilities(tool.name, tool.version, tool.capabilities);
+            await reloadTools();
+
+            return c.json({ success: true });
+        } catch (err) {
+            return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        }
+    });
+
+    app.put("/api/tools/:name/code", async (c) => {
+        try {
+            const name = c.req.param("name");
+            const body = await c.req.json().catch(() => ({}));
+            const code = body?.code as string;
+
+            if (!code) return c.json({ error: "No code provided" }, 400);
+
+            let tool: CustomTool;
+            try {
+                tool = await readToolData(name);
+            } catch {
+                return c.json({ error: `Tool '${name}' not found` }, 404);
+            }
+
+            tool.code = code;
+            tool.updatedAt = new Date().toISOString();
+            tool.version += 1;
+
+            await writeToolData(tool);
+            await reloadTools();
+
+            return c.json({ success: true, version: tool.version });
         } catch (err) {
             return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
         }

@@ -47,7 +47,10 @@ function initializeSchema(db: Database.Database): void {
             rate_limit TEXT,
             cache_config TEXT,
             retry_config TEXT,
-            tests TEXT
+            tests TEXT,
+            imports TEXT DEFAULT '[]',
+            returns_schema TEXT,
+            timeout_ms INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS execution_stats (
@@ -232,6 +235,20 @@ function initializeSchema(db: Database.Database): void {
             entry_json TEXT NOT NULL,
             cached_at TEXT NOT NULL,
             expires_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_cache (
+            cache_key TEXT PRIMARY KEY,
+            query TEXT NOT NULL,
+            result TEXT NOT NULL,
+            cached_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS marketplace_peers (
+            url TEXT PRIMARY KEY,
+            label TEXT,
+            added_at TEXT NOT NULL
         );
     `);
 }

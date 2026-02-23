@@ -68,7 +68,8 @@ async function handleWebhookRequest(
     webhookPath: string,
     method: string,
     body: any,
-    headers: Record<string, string>
+    headers: Record<string, string>,
+    rawBody: string
 ): Promise<{ status: number; body: any }> {
     if (!webhookExecutor) {
         return { status: 503, body: { error: "Webhook executor not initialized" } };
@@ -82,11 +83,22 @@ async function handleWebhookRequest(
     }
 
     if (row.secret) {
-        const providedSecret = headers["x-webhook-secret"] || "";
-        const expected = Buffer.from(row.secret);
-        const provided = Buffer.from(providedSecret);
-        if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
-            return { status: 401, body: { error: "Invalid webhook secret" } };
+        const hmacHeader = headers["x-hub-signature-256"];
+        if (hmacHeader) {
+            const signature = crypto.createHmac("sha256", row.secret).update(rawBody, "utf8").digest("hex");
+            const expectedSig = `sha256=${signature}`;
+            const expected = Buffer.from(expectedSig);
+            const provided = Buffer.from(hmacHeader);
+            if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
+                return { status: 401, body: { error: "Invalid HMAC signature" } };
+            }
+        } else {
+            const providedSecret = headers["x-webhook-secret"] || "";
+            const expected = Buffer.from(row.secret);
+            const provided = Buffer.from(providedSecret);
+            if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
+                return { status: 401, body: { error: "Invalid webhook secret" } };
+            }
         }
     }
 
@@ -115,10 +127,12 @@ export function startWebhookServer(
         const webhookPath = "/" + c.req.path.replace(/^\/webhook/, "").replace(/^\//, "");
         const method = c.req.method;
         let body: any = {};
+        let rawBody = "";
 
         try {
-            if (method === "POST") {
-                body = await c.req.json();
+            if (method === "POST" || method === "PUT" || method === "PATCH") {
+                rawBody = await c.req.text();
+                body = JSON.parse(rawBody);
             } else {
                 const query = c.req.query();
                 body = query;
@@ -131,7 +145,7 @@ export function startWebhookServer(
             headers[key.toLowerCase()] = value;
         });
 
-        const result = await handleWebhookRequest(webhookPath, method, body, headers);
+        const result = await handleWebhookRequest(webhookPath, method, body, headers, rawBody);
         return c.json(result.body, result.status as any);
     });
 

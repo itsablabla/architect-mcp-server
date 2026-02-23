@@ -98,6 +98,9 @@ export interface CustomTool {
     tests?: TestCase[];
     failingSince?: string;
     deprecated?: boolean;
+    imports?: string[];
+    returnsSchema?: JsonSchema;
+    timeoutMs?: number;
 }
 
 export interface JsonSchema {

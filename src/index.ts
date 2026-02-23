@@ -39,7 +39,7 @@ import { executeBatch, formatBatchResult } from "./execution/batch.js";
 import { createPipeline, getPipeline, deletePipeline, listAllPipelines, executePipeline, formatPipelineResult } from "./execution/pipelines.js";
 import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
 import { createWebhook, deleteWebhook, listAllWebhooks, startWebhookServer, stopWebhookServer, formatWebhook } from "./execution/webhooks.js";
-import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote, reportToolIssue, publishToolStats } from "./tools/marketplace.js";
+import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote, reportToolIssue, publishToolStats, add_marketplace_peer, list_marketplace_peers } from "./tools/marketplace.js";
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
 import { createPrompt, getPrompt, deletePrompt, listAllPrompts, renderPrompt, formatPrompt } from "./mcp/prompts.js";
 import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache, flushCache, startCacheFlushInterval, stopCacheFlushInterval } from "./core/cache.js";
@@ -64,6 +64,8 @@ const server = new McpServer({
 });
 
 const registeredTools = new Map<string, CustomTool>();
+let cacheSyncInterval: NodeJS.Timeout | null = null;
+const sessionLog: { created: string[], updated: string[], errors: string[] } = { created: [], updated: [], errors: [] };
 
 function toolExists(name: string): boolean {
     const db = getDb();
@@ -93,7 +95,10 @@ function readToolData(name: string): CustomTool {
         rateLimit: row.rate_limit ? JSON.parse(row.rate_limit) : undefined,
         cache: row.cache_config ? JSON.parse(row.cache_config) : undefined,
         retry: row.retry_config ? JSON.parse(row.retry_config) : undefined,
-        tests: row.tests ? JSON.parse(row.tests) : undefined
+        tests: row.tests ? JSON.parse(row.tests) : undefined,
+        imports: row.imports ? JSON.parse(row.imports) : undefined,
+        returnsSchema: row.returns_schema ? JSON.parse(row.returns_schema) : undefined,
+        timeoutMs: row.timeout_ms || undefined
     });
 }
 
@@ -106,8 +111,9 @@ async function writeToolData(tool: CustomTool): Promise<void> {
     db.prepare(
         `INSERT OR REPLACE INTO tools
          (name, description, code, schema, capabilities, category, tags, dependencies, version,
-          author, created_at, updated_at, deprecated, failing_since, rate_limit, cache_config, retry_config, tests)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          author, created_at, updated_at, deprecated, failing_since, rate_limit, cache_config, retry_config, tests,
+          imports, returns_schema, timeout_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
         tool.name, tool.description, tool.code,
         JSON.stringify(tool.schema),
@@ -124,7 +130,10 @@ async function writeToolData(tool: CustomTool): Promise<void> {
         tool.rateLimit ? JSON.stringify(tool.rateLimit) : null,
         tool.cache ? JSON.stringify(tool.cache) : null,
         tool.retry ? JSON.stringify(tool.retry) : null,
-        tool.tests ? JSON.stringify(tool.tests) : null
+        tool.tests ? JSON.stringify(tool.tests) : null,
+        tool.imports ? JSON.stringify(tool.imports) : null,
+        tool.returnsSchema ? JSON.stringify(tool.returnsSchema) : null,
+        tool.timeoutMs || null
     );
 }
 
@@ -162,8 +171,9 @@ async function callToolInternal(name: string, params: Record<string, unknown>): 
     const approvedCaps = permission?.approvedCapabilities ?? [];
 
     const sandbox = new ToolSandbox({
-        timeoutMs: 10000,
+        timeoutMs: tool.timeoutMs ?? 10000,
         capabilities: approvedCaps,
+        imports: tool.imports ?? [],
         toolCaller: callToolInternal
     });
 
@@ -215,8 +225,9 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
             }
 
             const sandbox = new ToolSandbox({
-                timeoutMs: 10000,
+                timeoutMs: tool.timeoutMs ?? 10000,
                 capabilities: approvedCaps,
+                imports: tool.imports ?? [],
                 toolCaller: callToolInternal
             });
 
@@ -288,10 +299,13 @@ server.registerTool(
             rate_limit_per_minute: z.number().optional().describe("Max calls per minute"),
             rate_limit_per_hour: z.number().optional().describe("Max calls per hour"),
             author: z.string().optional(),
-            github_token: z.string().optional().describe("GitHub token to auto-check marketplace before creating")
+            github_token: z.string().optional().describe("GitHub token to auto-check marketplace before creating"),
+            imports: z.array(z.string()).optional().describe("NPM packages to inject into the sandbox"),
+            returns_schema: z.string().optional().describe("JSON schema string for output validation"),
+            timeout_ms: z.number().optional().describe("Max execution time in milliseconds")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author, github_token }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author, github_token, imports, returns_schema, timeout_ms }) => {
         try {
             const validation = validateToolName(name);
             if (!validation.valid) {
@@ -351,6 +365,15 @@ server.registerTool(
                 return createToolResponse("Invalid JSON schema provided");
             }
 
+            let parsedReturnsSchema: JsonSchema | undefined;
+            if (returns_schema) {
+                try {
+                    parsedReturnsSchema = JSON.parse(returns_schema);
+                } catch {
+                    return createToolResponse("Invalid JSON returns_schema provided");
+                }
+            }
+
             let parsedCaps: Capability[] = [];
             try {
                 parsedCaps = capabilities.map(c => parseCapability(c).capability);
@@ -384,7 +407,10 @@ server.registerTool(
                 category: category || "other",
                 tags: tags || [],
                 dependencies: dependencies || [],
-                author
+                author,
+                imports,
+                returnsSchema: parsedReturnsSchema,
+                timeoutMs: timeout_ms
             };
 
             if (rate_limit_per_minute || rate_limit_per_hour) {
@@ -396,6 +422,7 @@ server.registerTool(
 
             await writeToolData(tool);
             await logAudit("tool_created", name, { version: 1, category, capabilities: parsedCaps.length });
+            sessionLog.created.push(name);
 
             const cacheKey = `${name}:${description}:${code}`;
             let knowledgePrompt = await getCachedKnowledge(cacheKey);
@@ -415,6 +442,7 @@ server.registerTool(
 
             return createToolResponse(response);
         } catch (error) {
+            sessionLog.errors.push(`create_tool ${name}: ${error instanceof Error ? error.message : String(error)}`);
             return createErrorResponse(error);
         }
     }
@@ -435,10 +463,13 @@ server.registerTool(
             dependencies: z.array(z.string()).optional(),
             rate_limit_per_minute: z.number().optional(),
             rate_limit_per_hour: z.number().optional(),
-            github_token: z.string().optional().describe("GitHub token to check marketplace for newer version")
+            github_token: z.string().optional().describe("GitHub token to check marketplace for newer version"),
+            imports: z.array(z.string()).optional().describe("NPM packages to inject into the sandbox"),
+            returns_schema: z.string().optional().describe("JSON schema string for output validation"),
+            timeout_ms: z.number().optional().describe("Max execution time in milliseconds")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, github_token }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, github_token, imports, returns_schema, timeout_ms }) => {
         try {
             if (!await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' not found.`);
@@ -475,6 +506,15 @@ server.registerTool(
                 }
             }
 
+            let parsedReturnsSchema = existing.returnsSchema;
+            if (returns_schema) {
+                try {
+                    parsedReturnsSchema = JSON.parse(returns_schema);
+                } catch {
+                    return createToolResponse("Invalid JSON returns_schema provided");
+                }
+            }
+
             let parsedCaps = existing.capabilities;
             if (capabilities) {
                 try {
@@ -494,7 +534,10 @@ server.registerTool(
                 capabilities: parsedCaps,
                 category: category ?? existing.category,
                 tags: tags ?? existing.tags,
-                dependencies: dependencies ?? existing.dependencies
+                dependencies: dependencies ?? existing.dependencies,
+                imports: imports ?? existing.imports,
+                returnsSchema: parsedReturnsSchema ?? existing.returnsSchema,
+                timeoutMs: timeout_ms ?? existing.timeoutMs
             };
 
             if (rate_limit_per_minute !== undefined || rate_limit_per_hour !== undefined) {
@@ -506,6 +549,7 @@ server.registerTool(
 
             await writeToolData(updated);
             await logAudit("tool_updated", name, { version: updated.version });
+            sessionLog.updated.push(name);
 
             const cacheKey = `${name}:${updated.description}:${updated.code}`;
             let knowledgePrompt = await getCachedKnowledge(cacheKey);
@@ -535,6 +579,7 @@ server.registerTool(
 
             return createToolResponse(kp + `Tool '${name}' updated to v${updated.version}.` + marketplaceNote);
         } catch (error) {
+            sessionLog.errors.push(`update_tool ${name}: ${error instanceof Error ? error.message : String(error)}`);
             return createErrorResponse(error);
         }
     }
@@ -726,16 +771,19 @@ server.registerTool(
     "delete_tool",
     {
         description: "Delete a tool permanently. If the tool has failures — fix it with update_tool first. Deleting and rebuilding narrower destroys the ecosystem.",
-        inputSchema: z.object({ name: z.string() }),
+        inputSchema: z.object({
+            name: z.string(),
+            force: z.boolean().optional().describe("Set to true to bypass the failure guard and force-delete a broken tool")
+        }),
     },
-    async ({ name }) => {
+    async ({ name, force }) => {
         try {
             if (!await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' not found.`);
             }
 
             const stats = await getToolStats(name);
-            if (stats && stats.failedCalls > 0 && stats.successfulCalls === 0) {
+            if (!force && stats && stats.failedCalls > 0 && stats.successfulCalls === 0) {
                 const tool = await readToolData(name);
                 return createToolResponse(
                     `⚠️ Tool '${name}' has never succeeded (${stats.failedCalls} failure(s)). Deletion blocked.\n\n` +
@@ -2304,9 +2352,13 @@ server.registerTool(
                 const usedBy = dependents[tool_name] ?? [];
                 const lines = [
                     `Tool: ${tool_name}`,
+                    `  Returns Schema: ${tool.returnsSchema ? "Yes" : "(none)"}`,
                     `  Depends on: ${deps.length ? deps.join(", ") : "(none)"}`,
                     `  Used by:    ${usedBy.length ? usedBy.join(", ") : "(none)"}`
                 ];
+                if (tool.returnsSchema) {
+                    lines.push(`\nSchema Details:\n${JSON.stringify(tool.returnsSchema, null, 2)}`);
+                }
                 return createToolResponse(lines.join("\n"));
             }
 
@@ -2321,7 +2373,8 @@ server.registerTool(
             lines.push("Roots (no dependencies):");
             for (const t of roots) {
                 const usedBy = dependents[t.name] ?? [];
-                lines.push(`  ${t.name} → used by: ${usedBy.length ? usedBy.join(", ") : "(none)"}`);
+                const typed = t.returnsSchema ? " [typed]" : "";
+                lines.push(`  ${t.name}${typed} → used by: ${usedBy.length ? usedBy.join(", ") : "(none)"}`);
             }
 
             const withDeps = allTools.filter(t => (t.dependencies ?? []).filter(d => nameSet.has(d)).length > 0);
@@ -2329,7 +2382,8 @@ server.registerTool(
                 lines.push("\nWith dependencies:");
                 for (const t of withDeps) {
                     const deps = (t.dependencies ?? []).filter(d => nameSet.has(d));
-                    lines.push(`  ${t.name} → depends on: ${deps.join(", ")}`);
+                    const typed = t.returnsSchema ? " [typed]" : "";
+                    lines.push(`  ${t.name}${typed} → depends on: ${deps.join(", ")}`);
                 }
             }
 
@@ -2767,6 +2821,153 @@ server.registerTool(
     }
 );
 
+server.registerTool(
+    "add_marketplace_peer",
+    {
+        description: "Add a new Architect instance URL as a remote marketplace peer to fetch tools from.",
+        inputSchema: z.object({
+            url: z.string().describe("URL of the peer (e.g. http://localhost:3002)"),
+            label: z.string().optional().describe("Optional label for the peer")
+        }),
+    },
+    async ({ url, label }) => {
+        try {
+            await add_marketplace_peer(url, label);
+            return createToolResponse(`Added marketplace peer: ${url}`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "list_marketplace_peers",
+    {
+        description: "List all registered marketplace peers.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const peers = await list_marketplace_peers();
+            if (peers.length === 0) return createToolResponse("No marketplace peers added.");
+            const lines = peers.map(p => `- ${p.url} (Label: ${p.label || "none"}) added at ${p.addedAt}`);
+            return createToolResponse(lines.join("\n"));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "get_system_status",
+    {
+        description: "Get a complete snapshot of the current system state: active tools, anomalies, schedules, webhooks, pipelines, memory, secrets, and cache stats. Call this at the start of any session to orient yourself before taking any action.",
+        inputSchema: z.object({}),
+    },
+    async () => {
+        try {
+            const now = new Date().toISOString();
+            const files = getAllToolFiles();
+            const allTools = files.flatMap(f => {
+                try { return [readToolData(f.replace(".json", ""))]; }
+                catch { return []; }
+            });
+            const totalTools = allTools.length;
+            const activeCount = registeredTools.size;
+            const deprecatedCount = allTools.filter(t => t.deprecated).length;
+            const inactiveCount = totalTools - activeCount - deprecatedCount;
+            const anomalies = await getActiveAnomalies();
+            const mutations = await getMutationCandidates();
+            const highPriorityFixes = mutations.filter((m: any) => m.priority === "high").length;
+            const schedules = await listAllSchedules();
+            const enabledSchedules = schedules.filter(s => s.enabled);
+            const nextSchedule = enabledSchedules.find(s => s.nextRun);
+            const webhooks = await listAllWebhooks();
+            const pipelines = await listAllPipelines();
+            const secrets = await listSecrets();
+            const cacheStats = await getCacheStats();
+            const knowledgeStats = await getKnowledgeCacheStats();
+            const memoryEntries = await listMemory();
+            const personas = await listPersonas();
+
+            const lines: string[] = [
+                `System Status — ${now}`,
+                ``,
+                `TOOLS`,
+                `  Active:      ${activeCount}`,
+                `  Inactive:    ${inactiveCount}`,
+                `  Deprecated:  ${deprecatedCount}`,
+                `  Anomalies:   ${anomalies.length}`,
+                `  Needs fix:   ${highPriorityFixes} high priority`,
+            ];
+
+            if (anomalies.length > 0) {
+                for (const a of anomalies) {
+                    lines.push(`    ⚠️  ${a.toolName}: ${a.reasons.join(", ")}`);
+                }
+            }
+
+            lines.push(``);
+            lines.push(`SCHEDULES`);
+            lines.push(`  Active: ${enabledSchedules.length} / ${schedules.length} total`);
+            if (nextSchedule?.nextRun) {
+                const diff = Math.round((new Date(nextSchedule.nextRun).getTime() - Date.now()) / 60000);
+                const diffStr = diff < 0 ? `overdue by ${Math.abs(diff)}m` : `in ~${diff}m`;
+                lines.push(`  Next:   ${nextSchedule.toolName} ${diffStr}`);
+            }
+
+            lines.push(``);
+            lines.push(`WEBHOOKS`);
+            lines.push(`  Registered: ${webhooks.length}`);
+            if (webhooks.length > 0) {
+                for (const w of webhooks) {
+                    lines.push(`    ${w.method} ${w.path} → ${w.toolName}`);
+                }
+            }
+
+            lines.push(``);
+            lines.push(`PIPELINES`);
+            lines.push(`  Defined: ${pipelines.length}`);
+            if (pipelines.length > 0) {
+                for (const p of pipelines) {
+                    lines.push(`    ${p.name} (${p.steps.length} steps)`);
+                }
+            }
+
+            lines.push(``);
+            lines.push(`MEMORY`);
+            lines.push(`  Entries: ${memoryEntries.length}`);
+            const namespaces = [...new Set(memoryEntries.map(e => e.namespace))];
+            if (namespaces.length > 0) {
+                lines.push(`  Namespaces: ${namespaces.join(", ")}`);
+            }
+
+            lines.push(``);
+            lines.push(`PERSONAS`);
+            lines.push(`  Defined: ${personas.length}`);
+            if (personas.length > 0) {
+                lines.push(`  Names: ${personas.map((p: any) => p.name).join(", ")}`);
+            }
+
+            lines.push(``);
+            lines.push(`SECRETS`);
+            lines.push(`  Stored: ${secrets.length}`);
+            if (secrets.length > 0) {
+                lines.push(`  Names: ${secrets.map(s => s.name).join(", ")}`);
+            }
+
+            lines.push(``);
+            lines.push(`CACHE`);
+            lines.push(`  Tool cache: ${cacheStats.hits} hits / ${cacheStats.misses} misses`);
+            lines.push(`  Knowledge:  ${knowledgeStats.fresh} fresh / ${knowledgeStats.expired} expired entries`);
+
+            return createToolResponse(lines.join("\n"));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
 async function loadExistingTools(): Promise<void> {
     const files = await getAllToolFiles();
     for (const file of files) {
@@ -2794,6 +2995,19 @@ async function loadExistingTools(): Promise<void> {
 
 async function gracefulShutdown(): Promise<void> {
     console.error("Shutting down...");
+
+    try {
+        const sessionData = {
+            timestamp: new Date().toISOString(),
+            created: Array.from(new Set(sessionLog.created)),
+            updated: Array.from(new Set(sessionLog.updated)),
+            errors: sessionLog.errors
+        };
+        await setMemory("sessions", "last_session", JSON.stringify(sessionData));
+    } catch (err) {
+        console.error("Failed to save session context", err);
+    }
+
     stopScheduler();
     stopDeprecationChecker();
     stopAnomalyChecker();
@@ -2811,6 +3025,14 @@ async function main(): Promise<void> {
     await ensureDir();
     await cleanExpiredCache();
     await loadExistingTools();
+
+    try {
+        const lastSessionStr = await getMemory("sessions", "last_session");
+        if (lastSessionStr) {
+            const data = JSON.parse(lastSessionStr);
+            console.error(`Last session (${data.timestamp}): created ${data.created.length} tools, updated ${data.updated.length} tools, ${data.errors.length} errors.`);
+        }
+    } catch (err) { }
 
     startCacheFlushInterval();
     startScheduler(callToolInternal);

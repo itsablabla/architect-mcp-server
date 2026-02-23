@@ -38,6 +38,7 @@ async function runSingleTest(
     const sandbox = new ToolSandbox({
         ...sandboxOptions,
         capabilities: tool.capabilities,
+        imports: tool.imports ?? [],
         timeoutMs: timeout
     });
 

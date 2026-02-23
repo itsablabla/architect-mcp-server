@@ -7,6 +7,21 @@
     <meta name="description" content="Management dashboard for Architect-MCP Server - monitor tools, stats, and configurations">
     <link rel="stylesheet" href="/styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/dracula.min.css">
+    <style>
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .modal-content { background: var(--surface); padding: 20px; border-radius: 8px; width: 90%; max-width: 800px; max-height: 90vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-muted); }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; color: var(--text-muted); }
+        .form-group textarea { width: 100%; min-height: 100px; padding: 10px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; font-family: monospace; }
+        .CodeMirror { height: 400px; border-radius: 4px; font-family: monospace; margin-bottom: 15px; }
+        #run-response { background: var(--bg); padding: 10px; border-radius: 4px; min-height: 50px; font-family: monospace; white-space: pre-wrap; margin-top: 15px; border: 1px solid var(--border); }
+        .tool-actions { margin-top: 10px; display: flex; gap: 8px; }
+    </style>
 </head>
 <body>
     <div class="app">
@@ -43,6 +58,45 @@
             <div id="main-content" class="content-body"></div>
         </main>
     </div>
+
+    <!-- Edit Code Modal -->
+    <div id="edit-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="edit-modal-title">Edit Code</h3>
+                <button class="modal-close" onclick="app.closeEditModal()">&times;</button>
+            </div>
+            <div class="form-group">
+                <textarea id="edit-code-editor"></textarea>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:10px;">
+                <button class="btn btn-secondary" onclick="app.closeEditModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="app.saveCode()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Run Tool Modal -->
+    <div id="run-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="run-modal-title">Run Tool</h3>
+                <button class="modal-close" onclick="app.closeRunModal()">&times;</button>
+            </div>
+            <div class="form-group">
+                <label for="run-params">Parameters (JSON)</label>
+                <textarea id="run-params" placeholder='{"key": "value"}'></textarea>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:10px;">
+                <button class="btn btn-secondary" onclick="app.closeRunModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="app.executeTool()">Execute</button>
+            </div>
+            <div id="run-response" style="display:none;"></div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

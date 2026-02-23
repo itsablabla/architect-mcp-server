@@ -1,4 +1,12 @@
 import { parentPort, workerData } from "worker_threads";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+import * as path from "path";
+
+const ALLOWED_IMPORTS = new Set([
+    "cheerio", "lodash", "date-fns", "xlsx", "nodemailer",
+    "marked", "papaparse", "axios", "uuid", "dayjs", "zod"
+]);
 
 interface WorkerRequest {
     type: "capability_request";
@@ -15,10 +23,11 @@ interface WorkerResponse {
     error?: string;
 }
 
-const { code, params, capabilityTypes } = workerData as {
+const { code, params, capabilityTypes, imports } = workerData as {
     code: string;
     params: Record<string, unknown>;
     capabilityTypes: string[];
+    imports?: string[];
 };
 
 const logs: string[] = [];
@@ -126,8 +135,26 @@ sandbox.secrets = {
 sandbox.callTool = (name: string, toolParams: Record<string, unknown>) =>
     sendCapabilityRequest("callTool", "call", [name, toolParams]);
 
+async function loadImports(): Promise<Record<string, any>> {
+    if (!imports || imports.length === 0) return {};
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const require = createRequire(path.resolve(__dirname, "../../node_modules"));
+    const resolved: Record<string, any> = {};
+    for (const pkg of imports) {
+        if (!ALLOWED_IMPORTS.has(pkg)) {
+            throw new Error(`Package '${pkg}' is not in the allowed imports list. Allowed: ${[...ALLOWED_IMPORTS].join(", ")}`);
+        }
+        resolved[pkg] = require(pkg);
+    }
+    return resolved;
+}
+
 async function run() {
     try {
+        const importedModules = await loadImports();
+        Object.assign(sandbox, importedModules);
+
         const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
         const argNames = Object.keys(sandbox);
         const argValues = Object.values(sandbox);

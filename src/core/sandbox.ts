@@ -19,6 +19,7 @@ export interface SandboxOptions {
     timeoutMs?: number;
     capabilities: Capability[];
     toolCaller?: (name: string, params: Record<string, unknown>) => Promise<any>;
+    imports?: string[];
 }
 
 export function extractLineNumber(error: Error, codeOffset: number = 4): number | null {
@@ -232,7 +233,8 @@ export class ToolSandbox {
             memoryLimitMB: options.memoryLimitMB ?? 128,
             timeoutMs: options.timeoutMs ?? 10000,
             capabilities: options.capabilities,
-            toolCaller: options.toolCaller
+            toolCaller: options.toolCaller,
+            imports: options.imports ?? []
         };
 
         for (const cap of this.options.capabilities) {
@@ -299,7 +301,7 @@ export class ToolSandbox {
             let settled = false;
 
             const worker = new Worker(workerPath, {
-                workerData: { code, params, capabilityTypes },
+                workerData: { code, params, capabilityTypes, imports: this.options.imports ?? [] },
                 resourceLimits: {
                     maxOldGenerationSizeMb: this.options.memoryLimitMB,
                     maxYoungGenerationSizeMb: this.options.memoryLimitMB / 4

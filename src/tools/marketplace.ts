@@ -58,6 +58,30 @@ export async function deleteFromMarketplace(id: string): Promise<boolean> {
     return result.changes > 0;
 }
 
+export interface MarketplacePeer {
+    url: string;
+    label?: string;
+    addedAt: string;
+}
+
+export async function add_marketplace_peer(url: string, label?: string): Promise<void> {
+    const db = getDb();
+    let cleanUrl = url.trim();
+    if (cleanUrl.endsWith('/')) cleanUrl = cleanUrl.slice(0, -1);
+    db.prepare("INSERT OR REPLACE INTO marketplace_peers (url, label, added_at) VALUES (?, ?, ?)")
+        .run(cleanUrl, label || null, new Date().toISOString());
+}
+
+export async function list_marketplace_peers(): Promise<MarketplacePeer[]> {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM marketplace_peers").all() as any[];
+    return rows.map(r => ({
+        url: r.url,
+        label: r.label,
+        addedAt: r.added_at
+    }));
+}
+
 export function formatMarketplaceEntry(entry: MarketplaceEntry): string {
     const lines = [
         `${entry.name} (v${entry.version}) by ${entry.author}`,
@@ -251,12 +275,36 @@ export async function browseRemote(
     query?: string,
     category?: string
 ): Promise<MarketplaceEntry[]> {
-    const cached = getCachedRemoteEntries(query, category);
-    if (cached !== null) return cached;
+    let githubEntries: MarketplaceEntry[] = [];
+    try {
+        const cached = getCachedRemoteEntries();
+        if (cached !== null) {
+            githubEntries = cached;
+        } else {
+            githubEntries = await fetchAndCacheRemote(token);
+        }
+    } catch { }
 
-    const entries = await fetchAndCacheRemote(token);
+    const peers = await list_marketplace_peers();
+    const peerPromises = peers.map(async (peer) => {
+        try {
+            const url = `${peer.url}/api/marketplace`;
+            const res = await fetch(url);
+            if (!res.ok) return [];
+            return await res.json() as MarketplaceEntry[];
+        } catch { return []; }
+    });
 
-    let filtered = entries;
+    const peerResults = await Promise.all(peerPromises);
+    const allEntries = [...githubEntries, ...peerResults.flat()];
+
+    const unique = new Map<string, MarketplaceEntry>();
+    for (const e of allEntries) {
+        if (!unique.has(e.id)) unique.set(e.id, e);
+    }
+
+    let filtered = Array.from(unique.values());
+
     if (query) {
         const q = query.toLowerCase();
         filtered = filtered.filter(e =>
@@ -383,18 +431,4 @@ export async function publishToolStats(
     };
 }
 
-let remoteSyncInterval: ReturnType<typeof setInterval> | null = null;
 
-export function startRemoteCacheSync(token: string, intervalMs = REMOTE_CACHE_TTL_MS): void {
-    if (remoteSyncInterval) return;
-    remoteSyncInterval = setInterval(() => {
-        fetchAndCacheRemote(token).catch(() => { });
-    }, intervalMs);
-}
-
-export function stopRemoteCacheSync(): void {
-    if (remoteSyncInterval) {
-        clearInterval(remoteSyncInterval);
-        remoteSyncInterval = null;
-    }
-}

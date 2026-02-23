@@ -132,6 +132,11 @@ const app = {
                     ${tool.category ? `<span class="badge badge-warning">${tool.category}</span>` : ''}
                     ${(tool.tags || []).map(t => `<span class="tag">#${t}</span>`).join('')}
                 </div>
+                <div class="tool-actions">
+                    <button class="btn btn-sm" style="background:var(--primary);color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;" onclick="app.runTool('${tool.name}')">Run</button>
+                    <button class="btn btn-sm" style="background:var(--secondary);color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;" onclick="app.editTool('${tool.name}')">Edit Code</button>
+                    ${!tool.active ? `<button class="btn btn-sm" style="background:var(--warning);color:#000;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;" onclick="app.approveTool('${tool.name}')">Approve</button>` : ''}
+                </div>
             </div>
         `).join("") + '</div>';
     },
@@ -324,6 +329,123 @@ const app = {
                 <div class="code-block">${p.template}</div>
             </div>
         `).join("") + '</div>';
+    },
+
+    currentTool: null,
+    editor: null,
+
+    async approveTool(name) {
+        if (!confirm(`Approve capabilities for tool '${name}'?`)) return;
+        try {
+            await fetch(`/api/tools/${name}/approve`, { method: "POST" });
+            app.refresh();
+        } catch (e) {
+            alert("Approval failed: " + e.message);
+        }
+    },
+
+    async runTool(name) {
+        this.currentTool = name;
+        document.getElementById("run-modal-title").textContent = `Run ${name}`;
+        document.getElementById("run-params").value = "{\n  \n}";
+        document.getElementById("run-response").style.display = "none";
+        document.getElementById("run-response").textContent = "";
+        document.getElementById("run-modal").classList.add("active");
+    },
+
+    closeRunModal() {
+        document.getElementById("run-modal").classList.remove("active");
+        this.currentTool = null;
+    },
+
+    async executeTool() {
+        if (!this.currentTool) return;
+        const paramsStr = document.getElementById("run-params").value;
+        let params = {};
+        if (paramsStr.trim()) {
+            try {
+                params = JSON.parse(paramsStr);
+            } catch (e) {
+                alert("Invalid JSON parameters");
+                return;
+            }
+        }
+
+        const respEl = document.getElementById("run-response");
+        respEl.style.display = "block";
+        respEl.textContent = "Executing...";
+
+        try {
+            const res = await fetch(`/api/tools/${this.currentTool}/run`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ params })
+            });
+            const data = await res.json();
+            if (data.success) {
+                respEl.textContent = "Success (" + data.durationMs + "ms):\n" + JSON.stringify(data.result, null, 2);
+                respEl.style.color = "var(--success)";
+            } else {
+                respEl.textContent = "Error (" + data.durationMs + "ms):\n" + data.error;
+                respEl.style.color = "var(--danger)";
+            }
+        } catch (e) {
+            respEl.textContent = "Request Failed:\n" + e.message;
+            respEl.style.color = "var(--danger)";
+        }
+    },
+
+    async editTool(name) {
+        this.currentTool = name;
+        document.getElementById("edit-modal-title").textContent = `Edit ${name}`;
+        document.getElementById("edit-modal").classList.add("active");
+
+        try {
+            const tools = await this.fetchApi("tools");
+            const tool = tools.find(t => t.name === name);
+            const code = tool ? tool.code : "// tool not found";
+
+            if (!this.editor) {
+                this.editor = CodeMirror.fromTextArea(document.getElementById("edit-code-editor"), {
+                    mode: "javascript",
+                    theme: "dracula",
+                    lineNumbers: true,
+                    matchBrackets: true
+                });
+            }
+            this.editor.setValue(code);
+            setTimeout(() => this.editor.refresh(), 50);
+        } catch (e) {
+            alert("Failed to load tool code");
+            this.closeEditModal();
+        }
+    },
+
+    closeEditModal() {
+        document.getElementById("edit-modal").classList.remove("active");
+        this.currentTool = null;
+    },
+
+    async saveCode() {
+        if (!this.currentTool || !this.editor) return;
+        const code = this.editor.getValue();
+
+        try {
+            const res = await fetch(`/api/tools/${this.currentTool}/code`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ code })
+            });
+            const data = await res.json();
+            if (data.success) {
+                this.closeEditModal();
+                app.refresh();
+            } else {
+                alert("Failed to save: " + data.error);
+            }
+        } catch (e) {
+            alert("Failed to save: " + e.message);
+        }
     }
 };
 

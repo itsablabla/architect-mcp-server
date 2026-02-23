@@ -1,92 +1,53 @@
-import * as fs from "fs/promises";
-import * as path from "path";
 import * as crypto from "crypto";
-import { fileURLToPath } from "url";
+import { getDb } from "./db.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const KNOWLEDGE_CACHE_FILE = path.resolve(__dirname, "..", "knowledge_cache.json");
 const DEFAULT_TTL_HOURS = 24;
-
-interface KnowledgeCacheEntry {
-    query: string;
-    result: string;
-    cachedAt: string;
-    expiresAt: string;
-}
-
-interface KnowledgeCacheStore {
-    version: number;
-    entries: Record<string, KnowledgeCacheEntry>;
-}
 
 function hashQuery(query: string): string {
     return crypto.createHash("sha256").update(query.toLowerCase().trim()).digest("hex").substring(0, 32);
 }
 
-async function loadKnowledgeCache(): Promise<KnowledgeCacheStore> {
-    try {
-        const content = await fs.readFile(KNOWLEDGE_CACHE_FILE, "utf-8");
-        return JSON.parse(content) as KnowledgeCacheStore;
-    } catch {
-        return { version: 1, entries: {} };
-    }
-}
-
-async function saveKnowledgeCache(store: KnowledgeCacheStore): Promise<void> {
-    await fs.writeFile(KNOWLEDGE_CACHE_FILE, JSON.stringify(store, null, 2));
-}
-
 export async function getCachedKnowledge(query: string): Promise<string | null> {
-    const store = await loadKnowledgeCache();
+    const db = getDb();
     const key = hashQuery(query);
-    const entry = store.entries[key];
-    if (!entry) return null;
-    if (new Date() > new Date(entry.expiresAt)) {
-        delete store.entries[key];
-        await saveKnowledgeCache(store);
+    const row = db.prepare("SELECT * FROM knowledge_cache WHERE cache_key = ?").get(key) as any;
+    if (!row) return null;
+    if (new Date() > new Date(row.expires_at)) {
+        db.prepare("DELETE FROM knowledge_cache WHERE cache_key = ?").run(key);
         return null;
     }
-    return entry.result;
+    return row.result;
 }
 
 export async function setCachedKnowledge(query: string, result: string, ttlHours: number = DEFAULT_TTL_HOURS): Promise<void> {
-    const store = await loadKnowledgeCache();
+    const db = getDb();
     const key = hashQuery(query);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
-    store.entries[key] = { query, result, cachedAt: now.toISOString(), expiresAt: expiresAt.toISOString() };
-    await saveKnowledgeCache(store);
+    db.prepare(
+        `INSERT OR REPLACE INTO knowledge_cache (cache_key, query, result, cached_at, expires_at)
+         VALUES (?, ?, ?, ?, ?)`
+    ).run(key, query, result, now.toISOString(), expiresAt.toISOString());
 }
 
 export async function clearExpiredKnowledgeCache(): Promise<number> {
-    const store = await loadKnowledgeCache();
-    const now = new Date();
-    let cleared = 0;
-    for (const key of Object.keys(store.entries)) {
-        if (now > new Date(store.entries[key].expiresAt)) {
-            delete store.entries[key];
-            cleared++;
-        }
-    }
-    if (cleared > 0) await saveKnowledgeCache(store);
-    return cleared;
+    const db = getDb();
+    const result = db.prepare("DELETE FROM knowledge_cache WHERE expires_at < ?").run(new Date().toISOString());
+    return result.changes;
 }
 
 export async function clearAllKnowledgeCache(): Promise<number> {
-    const store = await loadKnowledgeCache();
-    const count = Object.keys(store.entries).length;
-    await saveKnowledgeCache({ version: 1, entries: {} });
+    const db = getDb();
+    const count = (db.prepare("SELECT COUNT(*) as c FROM knowledge_cache").get() as any).c;
+    db.prepare("DELETE FROM knowledge_cache").run();
     return count;
 }
 
 export async function getKnowledgeCacheStats(): Promise<{ total: number; expired: number; fresh: number }> {
-    const store = await loadKnowledgeCache();
-    const now = new Date();
-    let expired = 0;
-    for (const entry of Object.values(store.entries)) {
-        if (now > new Date(entry.expiresAt)) expired++;
-    }
-    const total = Object.keys(store.entries).length;
+    const db = getDb();
+    const now = new Date().toISOString();
+    const total = (db.prepare("SELECT COUNT(*) as c FROM knowledge_cache").get() as any).c;
+    const expired = (db.prepare("SELECT COUNT(*) as c FROM knowledge_cache WHERE expires_at < ?").get(now) as any).c;
     return { total, expired, fresh: total - expired };
 }
 
