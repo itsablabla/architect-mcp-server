@@ -2,19 +2,13 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { CustomPrompt, PromptStore, PromptArgument } from "../types.js";
+import { fileExists } from "../core/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_FILE = path.resolve(__dirname, "..", "prompts.json");
 const PROMPTS_SCHEMA_VERSION = 1;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadPrompts(): Promise<PromptStore> {
     if (!await fileExists(PROMPTS_FILE)) {

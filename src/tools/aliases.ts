@@ -2,19 +2,13 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { ToolAlias, AliasStore } from "../types.js";
+import { fileExists } from "../core/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ALIASES_FILE = path.resolve(__dirname, "..", "aliases.json");
 const ALIASES_SCHEMA_VERSION = 1;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadAliases(): Promise<AliasStore> {
     if (!await fileExists(ALIASES_FILE)) {

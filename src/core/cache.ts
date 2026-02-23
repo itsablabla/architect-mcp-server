@@ -3,6 +3,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 import { CacheStore, CacheEntry, CacheConfig } from "../types.js";
+import { fileExists } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_FILE = path.resolve(__dirname, "..", "cache.json");
@@ -12,14 +13,7 @@ let memoryStore: CacheStore | null = null;
 let dirty = false;
 let flushInterval: ReturnType<typeof setInterval> | null = null;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 async function loadFromDisk(): Promise<CacheStore> {
     if (!await fileExists(CACHE_FILE)) {
@@ -219,25 +213,4 @@ export async function getCacheStats(): Promise<{
         hitRate: Math.round(hitRate * 100) / 100,
         entriesByTool
     };
-}
-
-export function formatCacheStats(stats: Awaited<ReturnType<typeof getCacheStats>>): string {
-    const lines = [
-        `Total Cached Entries: ${stats.totalEntries}`,
-        `Cache Hits: ${stats.hits}`,
-        `Cache Misses: ${stats.misses}`,
-        `Hit Rate: ${stats.hitRate}%`,
-        "",
-        "Entries by Tool:"
-    ];
-
-    for (const [tool, count] of Object.entries(stats.entriesByTool)) {
-        lines.push(`  ${tool}: ${count}`);
-    }
-
-    if (Object.keys(stats.entriesByTool).length === 0) {
-        lines.push("  (none)");
-    }
-
-    return lines.join("\n");
 }

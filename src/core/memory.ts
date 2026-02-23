@@ -2,19 +2,13 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { MemoryEntry, MemoryStore } from "../types.js";
+import { fileExists } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_FILE = path.resolve(__dirname, "..", "memory.json");
 const MEMORY_SCHEMA_VERSION = 1;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 async function loadMemory(): Promise<MemoryStore> {
     if (!await fileExists(MEMORY_FILE)) {
@@ -130,18 +124,4 @@ export async function clearMemory(namespace?: string): Promise<number> {
     return count;
 }
 
-export async function cleanExpiredMemory(): Promise<number> {
-    const store = await loadMemory();
-    const now = new Date();
-    let count = 0;
 
-    for (const [storeKey, entry] of Object.entries(store.entries)) {
-        if (entry.expiresAt && new Date(entry.expiresAt) < now) {
-            delete store.entries[storeKey];
-            count++;
-        }
-    }
-
-    if (count > 0) await saveMemory(store);
-    return count;
-}

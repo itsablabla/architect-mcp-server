@@ -37,6 +37,7 @@ export type AuditAction =
     | "prompt_deleted"
     | "marketplace_exported"
     | "marketplace_imported"
+    | "marketplace_deleted"
     | "batch_executed"
     | "alias_created"
     | "alias_deleted"

@@ -3,6 +3,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 import { SecretEntry, SecretsStore } from "../types.js";
+import { fileExists } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SECRETS_FILE = path.resolve(__dirname, "..", "secrets.json");
@@ -12,14 +13,7 @@ const ALGORITHM = "aes-256-gcm";
 
 let cachedKey: Buffer | null = null;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 async function getOrCreateKey(): Promise<Buffer> {
     if (cachedKey) {
@@ -137,11 +131,6 @@ export async function listSecrets(): Promise<Array<{ name: string; createdAt: st
         createdAt: s.createdAt,
         updatedAt: s.updatedAt
     }));
-}
-
-export async function secretExists(name: string): Promise<boolean> {
-    const store = await loadSecrets();
-    return name in store.secrets;
 }
 
 export function createSecretsApi(): { get: (name: string) => Promise<string | null> } {

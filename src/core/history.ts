@@ -7,19 +7,13 @@ import {
     RateLimitConfig,
     RateLimitState
 } from "../types.js";
+import { fileExists } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HISTORY_FILE = path.resolve(__dirname, "..", "execution_history.json");
 const HISTORY_SCHEMA_VERSION = 1;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadHistory(): Promise<ExecutionHistoryStore> {
     if (!await fileExists(HISTORY_FILE)) {

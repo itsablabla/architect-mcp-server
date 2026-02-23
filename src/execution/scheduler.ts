@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { ScheduleConfig, ScheduleStore, CustomTool } from "../types.js";
 import { CronExpressionParser } from "cron-parser";
 import { runToolTests } from "../tools/testing.js";
+import { fileExists } from "../core/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEDULES_FILE = path.resolve(__dirname, "..", "schedules.json");
@@ -15,14 +16,7 @@ let deprecationInterval: ReturnType<typeof setInterval> | null = null;
 let deprecationToolReader: (() => Promise<CustomTool[]>) | null = null;
 let deprecationToolWriter: ((tool: CustomTool) => Promise<void>) | null = null;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadSchedules(): Promise<ScheduleStore> {
     if (!await fileExists(SCHEDULES_FILE)) {

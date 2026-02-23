@@ -2,19 +2,13 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { Pipeline, PipelineStep, PipelineStore } from "../types.js";
+import { fileExists } from "../core/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PIPELINES_FILE = path.resolve(__dirname, "..", "pipelines.json");
 const PIPELINES_SCHEMA_VERSION = 1;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadPipelines(): Promise<PipelineStore> {
     if (!await fileExists(PIPELINES_FILE)) {

@@ -1,9 +1,11 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import * as crypto from "crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { WebhookConfig, WebhookStore } from "../types.js";
+import { fileExists } from "../core/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEBHOOKS_FILE = path.resolve(__dirname, "..", "webhooks.json");
@@ -13,14 +15,7 @@ let webhookServer: ReturnType<typeof serve> | null = null;
 let webhookApp: Hono | null = null;
 let webhookExecutor: ((toolName: string, params: Record<string, unknown>) => Promise<any>) | null = null;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 export async function loadWebhooks(): Promise<WebhookStore> {
     if (!await fileExists(WEBHOOKS_FILE)) {
@@ -105,8 +100,10 @@ async function handleWebhookRequest(
     }
 
     if (webhook.secret) {
-        const providedSecret = headers["x-webhook-secret"];
-        if (providedSecret !== webhook.secret) {
+        const providedSecret = headers["x-webhook-secret"] || "";
+        const expected = Buffer.from(webhook.secret);
+        const provided = Buffer.from(providedSecret);
+        if (expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
             return { status: 401, body: { error: "Invalid webhook secret" } };
         }
     }
@@ -158,8 +155,15 @@ export function startWebhookServer(
 
     webhookApp.get("/health", (c) => c.json({ status: "ok" }));
 
-    webhookServer = serve({ fetch: webhookApp.fetch, port });
-    console.error(`Webhook server started on port ${port}`);
+    try {
+        webhookServer = serve({ fetch: webhookApp.fetch, port });
+        console.error(`Webhook server started on port ${port}`);
+    } catch (err) {
+        console.error(`Webhook server failed to start on port ${port}: ${err instanceof Error ? err.message : String(err)}`);
+        webhookServer = null;
+        webhookApp = null;
+        webhookExecutor = null;
+    }
 }
 
 export function stopWebhookServer(): void {

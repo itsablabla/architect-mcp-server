@@ -3,6 +3,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import { AnomalyRecord, AnomalyStore, ExecutionStats } from "../types.js";
 import { getAllStats } from "./history.js";
+import { fileExists } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ANOMALY_FILE = path.resolve(__dirname, "..", "anomalies.json");
@@ -12,14 +13,7 @@ const DURATION_SPIKE_FACTOR = 3;
 const FAIL_RATE_SPIKE_THRESHOLD = 0.2;
 const MIN_CALLS_FOR_BASELINE = 5;
 
-async function fileExists(filePath: string): Promise<boolean> {
-    try {
-        await fs.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-}
+
 
 async function loadAnomalyStore(): Promise<AnomalyStore> {
     if (!await fileExists(ANOMALY_FILE)) {

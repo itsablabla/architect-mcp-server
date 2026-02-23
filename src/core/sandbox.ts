@@ -341,10 +341,18 @@ export class ToolSandbox {
             const script = new vm.Script(wrappedCode);
 
             const result = await new Promise<any>((resolve, reject) => {
-                context.__resolve = resolve;
-                context.__reject = reject;
+                let timeoutId: ReturnType<typeof setTimeout>;
 
-                const timeoutId = setTimeout(() => {
+                context.__resolve = (val: any) => {
+                    clearTimeout(timeoutId);
+                    resolve(val);
+                };
+                context.__reject = (err: any) => {
+                    clearTimeout(timeoutId);
+                    reject(err);
+                };
+
+                timeoutId = setTimeout(() => {
                     reject(new Error(`Execution timed out after ${this.options.timeoutMs}ms`));
                 }, this.options.timeoutMs);
 
@@ -356,8 +364,6 @@ export class ToolSandbox {
                     clearTimeout(timeoutId);
                     reject(err);
                 }
-
-                setTimeout(() => clearTimeout(timeoutId), 0);
             });
 
             return {

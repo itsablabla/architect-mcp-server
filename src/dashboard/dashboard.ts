@@ -458,8 +458,24 @@ export function startDashboard(
         }
     });
 
-    dashboardServer = serve({ fetch: app.fetch, port });
-    console.error(`Dashboard started on http://localhost:${port}`);
+    const dashboardSecret = process.env.DASHBOARD_SECRET;
+    if (dashboardSecret) {
+        app.use("/api/*", async (c, next) => {
+            const auth = c.req.header("Authorization");
+            if (!auth || auth !== `Bearer ${dashboardSecret}`) {
+                return c.json({ error: "Unauthorized" }, 401);
+            }
+            await next();
+        });
+    }
+
+    try {
+        dashboardServer = serve({ fetch: app.fetch, port });
+        console.error(`Dashboard started on http://localhost:${port}`);
+    } catch (err) {
+        console.error(`Dashboard failed to start on port ${port}: ${err instanceof Error ? err.message : String(err)}`);
+        dashboardServer = null;
+    }
 }
 
 export function stopDashboard(): void {

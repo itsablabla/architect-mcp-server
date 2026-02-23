@@ -13,7 +13,9 @@ import {
     migrateToolData,
     Capability,
     ExportedTool,
-    PipelineStep
+    PipelineStep,
+    isReservedToolName,
+    ReservedToolName
 } from "./types.js";
 import {
     parseCapability,
@@ -47,7 +49,7 @@ import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
 import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
 import { createPersona, getPersona, updatePersona, deletePersona, listPersonas, formatPersona } from "./tools/personas.js";
-import { setMemory, getMemory, deleteMemory, listMemory, clearMemory, cleanExpiredMemory } from "./core/memory.js";
+import { setMemory, getMemory, deleteMemory, listMemory, clearMemory } from "./core/memory.js";
 import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, startAnomalyChecker, stopAnomalyChecker } from "./core/anomaly.js";
 import { getMutationCandidates, getMutationContext } from "./core/mutation.js";
 import { matchIntent } from "./core/intent.js";
@@ -182,8 +184,8 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
 
             if (tool.cache) {
                 const cached = await getCachedResult(tool.name, params, tool.cache);
-                if (cached !== null) {
-                    return createToolResponse(JSON.stringify(cached, null, 2) + "\n\n(cached)");
+                if (cached.hit) {
+                    return createToolResponse(JSON.stringify(cached.result, null, 2) + "\n\n(cached)");
                 }
             }
 
@@ -1212,7 +1214,10 @@ server.registerTool(
             if (value === null) {
                 return createToolResponse(`Secret '${name}' not found.`);
             }
-            return createToolResponse(`Secret '${name}': ${value}`);
+            const masked = value.length > 8
+                ? value.slice(0, 4) + "****" + value.slice(-4)
+                : "****";
+            return createToolResponse(`Secret '${name}': ${masked}\n\n(Full value available to tools via secrets.get())`);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -1670,6 +1675,14 @@ server.registerTool(
     },
     async ({ tool_name, path: webhookPath, method, secret }) => {
         try {
+            if (!isReservedToolName(tool_name as ReservedToolName)) {
+                try {
+                    await readToolData(tool_name);
+                } catch {
+                    throw new Error(`Tool '${tool_name}' not found. Cannot create webhook.`);
+                }
+            }
+
             const webhook = await createWebhook({
                 toolName: tool_name,
                 path: webhookPath,
@@ -1816,7 +1829,7 @@ server.registerTool(
             if (!deleted) {
                 return createToolResponse(`Marketplace entry '${id}' not found.`);
             }
-            await logAudit("marketplace_exported", id, { action: "deleted" });
+            await logAudit("marketplace_deleted", id);
             return createToolResponse(`Marketplace entry '${id}' deleted.`);
         } catch (error) {
             return createErrorResponse(error);
@@ -2570,7 +2583,7 @@ server.registerTool(
 
             const lines = [
                 `Mutation Context for '${tool_name}':`,
-                `Current Fail Rate: ${(context.anomaly?.currentFailRate || 0 * 100).toFixed(1)}% (Baseline: ${(context.anomaly?.baselineFailRate || 0 * 100).toFixed(1)}%)`,
+                `Current Fail Rate: ${((context.anomaly?.currentFailRate || 0) * 100).toFixed(1)}% (Baseline: ${((context.anomaly?.baselineFailRate || 0) * 100).toFixed(1)}%)`,
                 `Current Avg Duration: ${context.stats?.averageDurationMs || 0}ms`,
                 `Recent Issues: ${context.anomaly?.reasons.join("; ") || "None"}`,
                 `\nRecent Logs:`,
