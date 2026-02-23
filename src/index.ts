@@ -250,7 +250,7 @@ async function notifyToolsChanged(): Promise<void> {
 server.registerTool(
     "create_tool",
     {
-        description: "Create a new custom tool definition with optional category, tags, and rate limiting.",
+        description: "Create a new reusable tool. ALWAYS call search_tools first — rebuild nothing that exists. Design for the general case, never for the specific task. fetch() returns {ok,status,body} — never call .text() or .json(). Credentials via secrets.get() only. Include at least one test case.",
         inputSchema: z.object({
             name: z.string().describe("Unique tool name (lowercase, underscores allowed)"),
             description: z.string().describe("Tool description for LLM"),
@@ -398,7 +398,7 @@ server.registerTool(
 server.registerTool(
     "update_tool",
     {
-        description: "Update an existing custom tool.",
+        description: "Fix or improve an existing tool. Read the full error before changing anything. One targeted fix beats delete and rebuild every time. Never narrow a tool's scope to make an error go away.",
         inputSchema: z.object({
             name: z.string(),
             description: z.string().optional(),
@@ -518,7 +518,7 @@ server.registerTool(
 server.registerTool(
     "mark_tool_deprecated",
     {
-        description: "Mark a tool as deprecated (or clear the deprecation). Sets failingSince and deprecated flags so agents know to stop using it and find a replacement.",
+        description: "Mark a tool as deprecated when it cannot be fixed. Always search for or build a replacement immediately after deprecating.",
         inputSchema: z.object({
             name: z.string().describe("Tool name"),
             deprecated: z.boolean().describe("true to mark deprecated, false to clear deprecation"),
@@ -553,9 +553,8 @@ server.registerTool(
 
 server.registerTool(
     "validate_tool",
-
     {
-        description: "Validate tool code syntax without creating the tool.",
+        description: "Validate JavaScript syntax without creating the tool. Run this before create_tool when the code is complex.",
         inputSchema: z.object({
             code: z.string().describe("JavaScript code to validate")
         }),
@@ -573,7 +572,7 @@ server.registerTool(
 server.registerTool(
     "save_tool",
     {
-        description: "Activate a tool from the registry.",
+        description: "Activate a tool after creation or approval. Run this after approve_tool if capabilities were requested.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -606,7 +605,7 @@ server.registerTool(
 server.registerTool(
     "approve_tool",
     {
-        description: "Approve capabilities for a custom tool.",
+        description: "Approve capabilities for a tool before activation. Request minimum capabilities only — precise approvals are faster. net needs domains, fs needs mode and paths, child_process needs exact commands, env needs exact variable names.",
         inputSchema: z.object({
             name: z.string(),
             capabilities: z.array(z.string()).optional()
@@ -647,7 +646,7 @@ server.registerTool(
 server.registerTool(
     "revoke_permissions",
     {
-        description: "Revoke permissions for a tool.",
+        description: "Revoke approved capabilities and deactivate a tool. Use when a tool's capability scope needs to change.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -676,7 +675,7 @@ server.registerTool(
 server.registerTool(
     "list_permissions",
     {
-        description: "List all tool permissions.",
+        description: "List all approved capability sets. Review this when debugging why a tool cannot access network, filesystem, or environment.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -701,13 +700,24 @@ server.registerTool(
 server.registerTool(
     "delete_tool",
     {
-        description: "Delete a custom tool.",
+        description: "Delete a tool permanently. If the tool has failures — fix it with update_tool first. Deleting and rebuilding narrower destroys the ecosystem.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
         try {
             if (!await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' not found.`);
+            }
+
+            const stats = await getToolStats(name);
+            if (stats && stats.failedCalls > 0 && stats.successfulCalls === 0) {
+                const tool = await readToolData(name);
+                return createToolResponse(
+                    `⚠️ Tool '${name}' has never succeeded (${stats.failedCalls} failure(s)). Deletion blocked.\n\n` +
+                    `Fix it first with update_tool — a failing tool is one fix away from working.\n\n` +
+                    `Current code:\n\`\`\`javascript\n${tool.code}\n\`\`\`\n\n` +
+                    `If you truly want to delete it, call delete_tool again with force=true.`
+                );
             }
 
             await deleteToolFile(name);
@@ -730,7 +740,7 @@ server.registerTool(
 server.registerTool(
     "list_tools",
     {
-        description: "List custom tools with filtering.",
+        description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists.",
         inputSchema: z.object({
             active_only: z.boolean().optional(),
             category: z.enum(["api", "file", "data", "utility", "automation", "integration", "other"]).optional(),
@@ -790,7 +800,7 @@ server.registerTool(
 server.registerTool(
     "get_tool_source",
     {
-        description: "Get tool source code and details.",
+        description: "Get full source code and metadata for a tool. Run this before update_tool to understand what you are changing.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -832,7 +842,7 @@ server.registerTool(
 server.registerTool(
     "get_tool_stats",
     {
-        description: "Get execution statistics for a tool.",
+        description: "Get execution statistics for a tool or all tools. Use to spot failure patterns before they become anomalies.",
         inputSchema: z.object({
             name: z.string().optional().describe("Tool name, or omit for all tools")
         }),
@@ -866,7 +876,7 @@ server.registerTool(
 server.registerTool(
     "export_tool",
     {
-        description: "Export a tool as JSON.",
+        description: "Export a tool as portable JSON including permissions. Use before marketplace_publish or to back up a tool.",
         inputSchema: z.object({
             name: z.string(),
             include_permissions: z.boolean().default(true)
@@ -901,7 +911,7 @@ server.registerTool(
 server.registerTool(
     "import_tool",
     {
-        description: "Import a tool from JSON.",
+        description: "Import a tool from exported JSON. Use to restore a backup or install a shared tool.",
         inputSchema: z.object({
             json: z.string().describe("Exported tool JSON"),
             overwrite: z.boolean().default(false)
@@ -943,7 +953,7 @@ server.registerTool(
 server.registerTool(
     "list_templates",
     {
-        description: "List available tool templates.",
+        description: "List available starter templates. Run before create_tool — never write from scratch what a template already provides.",
         inputSchema: z.object({
             category: z.enum(["api", "file", "data", "utility", "automation", "integration", "other"]).optional()
         }),
@@ -962,7 +972,7 @@ server.registerTool(
 server.registerTool(
     "create_from_template",
     {
-        description: "Create a tool from a template.",
+        description: "Create a tool from a template. Always prefer this over writing from scratch when a template fits.",
         inputSchema: z.object({
             template_id: z.string(),
             name: z.string().describe("Name for the new tool"),
@@ -1036,7 +1046,7 @@ server.registerTool(
 server.registerTool(
     "get_audit_logs",
     {
-        description: "Get audit logs.",
+        description: "Get the execution audit trail for a tool or all tools. Run when debugging unexpected behavior or tracing what changed and when.",
         inputSchema: z.object({
             tool_name: z.string().optional(),
             action: z.string().optional(),
@@ -1066,7 +1076,7 @@ server.registerTool(
 server.registerTool(
     "reload_tools",
     {
-        description: "Reload all approved tools.",
+        description: "Reload all approved tools from disk. Run after manual file changes or after recovering from an error state.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1096,7 +1106,7 @@ server.registerTool(
 server.registerTool(
     "list_versions",
     {
-        description: "List version history for a tool.",
+        description: "List version history for a tool. Run before rollback_tool to find the right version.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -1120,7 +1130,7 @@ server.registerTool(
 server.registerTool(
     "rollback_tool",
     {
-        description: "Rollback a tool to a previous version.",
+        description: "Roll back a tool to a previous version. Use when an update broke something and the fix is not obvious.",
         inputSchema: z.object({
             name: z.string(),
             version: z.number().describe("Version number to rollback to")
@@ -1157,7 +1167,7 @@ server.registerTool(
 server.registerTool(
     "diff_versions",
     {
-        description: "Compare two versions of a tool.",
+        description: "Compare two versions of a tool. Run before rollback to understand exactly what changed.",
         inputSchema: z.object({
             name: z.string(),
             v1: z.number(),
@@ -1185,7 +1195,7 @@ server.registerTool(
 server.registerTool(
     "set_secret",
     {
-        description: "Store an encrypted secret.",
+        description: "Store an encrypted credential. Always use this for API keys, tokens, passwords, and connection strings. Never put credentials in tool code.",
         inputSchema: z.object({
             name: z.string().describe("Secret name"),
             value: z.string().describe("Secret value to encrypt")
@@ -1205,7 +1215,7 @@ server.registerTool(
 server.registerTool(
     "get_secret",
     {
-        description: "Retrieve a decrypted secret.",
+        description: "Retrieve a masked view of a stored secret name. Use list_secrets to see what credentials are available before building tools that need them.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -1227,7 +1237,7 @@ server.registerTool(
 server.registerTool(
     "delete_secret",
     {
-        description: "Delete a stored secret.",
+        description: "Delete a stored secret. Verify no active tools depend on it before deleting.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -1247,7 +1257,7 @@ server.registerTool(
 server.registerTool(
     "list_secrets",
     {
-        description: "List all stored secret names.",
+        description: "List all stored secret names. Run this before building tools that need credentials to know what is already available.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1267,7 +1277,7 @@ server.registerTool(
 server.registerTool(
     "clear_cache",
     {
-        description: "Clear cached results.",
+        description: "Clear cached results for a tool or all tools. Run after fixing a tool that was returning wrong cached results.",
         inputSchema: z.object({
             tool_name: z.string().optional().describe("Clear cache for specific tool, or all if omitted")
         }),
@@ -1291,7 +1301,7 @@ server.registerTool(
 server.registerTool(
     "cache_stats",
     {
-        description: "Get cache statistics.",
+        description: "Get cache hit rate and entry counts. Use to decide if a tool needs cache TTL adjustment.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1307,7 +1317,7 @@ server.registerTool(
 server.registerTool(
     "run_tests",
     {
-        description: "Run tests for a tool.",
+        description: "Run all test cases for a tool. Run after every update_tool call to confirm the fix worked. A tool with no passing tests is a tool waiting to fail silently.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -1336,7 +1346,7 @@ server.registerTool(
 server.registerTool(
     "create_alias",
     {
-        description: "Create an alias for a tool with preset parameters.",
+        description: "Create a named shortcut for a tool with preset parameters. Create aliases for any tool called repeatedly with the same base configuration.",
         inputSchema: z.object({
             alias: z.string().describe("Alias name"),
             target_tool: z.string().describe("Target tool name"),
@@ -1369,7 +1379,7 @@ server.registerTool(
 server.registerTool(
     "delete_alias",
     {
-        description: "Delete a tool alias.",
+        description: "Delete a tool alias. The underlying tool is not affected.",
         inputSchema: z.object({ alias: z.string() }),
     },
     async ({ alias }) => {
@@ -1389,7 +1399,7 @@ server.registerTool(
 server.registerTool(
     "list_aliases",
     {
-        description: "List all tool aliases.",
+        description: "List all tool aliases. Check this before creating an alias — it may already exist.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1411,7 +1421,7 @@ server.registerTool(
 server.registerTool(
     "execute_alias",
     {
-        description: "Execute a tool through its alias.",
+        description: "Execute a tool through a named alias with preset parameters. Use for frequently repeated calls with the same base params.",
         inputSchema: z.object({
             alias: z.string(),
             params: z.string().default("{}").describe("JSON parameters to merge with preset")
@@ -1443,7 +1453,7 @@ server.registerTool(
 server.registerTool(
     "batch_execute",
     {
-        description: "Execute a tool with multiple inputs in parallel.",
+        description: "Execute a tool against multiple inputs in parallel. Use instead of looping callTool() manually. Set concurrency based on rate limits.",
         inputSchema: z.object({
             tool_name: z.string(),
             inputs: z.string().describe("JSON array of input objects"),
@@ -1486,7 +1496,7 @@ server.registerTool(
 server.registerTool(
     "create_pipeline",
     {
-        description: "Create a tool execution pipeline.",
+        description: "Chain multiple tools into a reusable pipeline. Create a pipeline any time two or more tools always run in sequence for a task.",
         inputSchema: z.object({
             name: z.string(),
             description: z.string(),
@@ -1514,7 +1524,7 @@ server.registerTool(
 server.registerTool(
     "execute_pipeline",
     {
-        description: "Execute a pipeline.",
+        description: "Run a pipeline with optional initial input. Output of each step is available to the next via $prev.result or $stepName.result.",
         inputSchema: z.object({
             name: z.string(),
             input: z.string().default("{}").describe("JSON initial input")
@@ -1550,7 +1560,7 @@ server.registerTool(
 server.registerTool(
     "delete_pipeline",
     {
-        description: "Delete a pipeline.",
+        description: "Delete a pipeline. The individual tools inside it are not affected.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -1570,7 +1580,7 @@ server.registerTool(
 server.registerTool(
     "list_pipelines",
     {
-        description: "List all pipelines.",
+        description: "List all pipelines. Check this before building a new sequence — the pipeline may already exist.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1592,7 +1602,7 @@ server.registerTool(
 server.registerTool(
     "create_schedule",
     {
-        description: "Create a cron schedule for a tool.",
+        description: "Schedule a tool to run automatically on a cron expression. Create a schedule immediately after building any tool for a recurring task — do not wait to be asked.",
         inputSchema: z.object({
             tool_name: z.string(),
             cron: z.string().describe("Cron expression (e.g. '*/5 * * * *')"),
@@ -1625,7 +1635,7 @@ server.registerTool(
 server.registerTool(
     "delete_schedule",
     {
-        description: "Delete a schedule.",
+        description: "Delete a schedule. The tool itself is not affected.",
         inputSchema: z.object({ id: z.string() }),
     },
     async ({ id }) => {
@@ -1645,7 +1655,7 @@ server.registerTool(
 server.registerTool(
     "list_schedules",
     {
-        description: "List all schedules.",
+        description: "List all active schedules with next run times.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1665,7 +1675,7 @@ server.registerTool(
 server.registerTool(
     "create_webhook",
     {
-        description: "Create a webhook that triggers a tool.",
+        description: "Expose a tool as an HTTP endpoint. Create a webhook for any tool that needs to be triggered by external systems or events.",
         inputSchema: z.object({
             tool_name: z.string(),
             path: z.string().describe("Webhook path (e.g. '/my-hook')"),
@@ -1701,7 +1711,7 @@ server.registerTool(
 server.registerTool(
     "delete_webhook",
     {
-        description: "Delete a webhook.",
+        description: "Delete a webhook endpoint. The tool itself is not affected.",
         inputSchema: z.object({ id: z.string() }),
     },
     async ({ id }) => {
@@ -1721,7 +1731,7 @@ server.registerTool(
 server.registerTool(
     "list_webhooks",
     {
-        description: "List all webhooks.",
+        description: "List all webhook endpoints with their paths and methods.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1741,7 +1751,7 @@ server.registerTool(
 server.registerTool(
     "marketplace_export",
     {
-        description: "Export a tool to the local marketplace.",
+        description: "Export a tool to the local marketplace for sharing or backup.",
         inputSchema: z.object({
             name: z.string(),
             author: z.string().describe("Author name")
@@ -1766,7 +1776,7 @@ server.registerTool(
 server.registerTool(
     "marketplace_import",
     {
-        description: "Import a tool from the marketplace.",
+        description: "Import a tool from the local marketplace.",
         inputSchema: z.object({
             id: z.string().describe("Marketplace entry ID"),
             overwrite: z.boolean().default(false)
@@ -1798,7 +1808,7 @@ server.registerTool(
 server.registerTool(
     "marketplace_list",
     {
-        description: "List marketplace entries.",
+        description: "List all tools in the local marketplace.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -1870,7 +1880,7 @@ server.registerTool(
 server.registerTool(
     "marketplace_browse",
     {
-        description: "Browse tools on the remote GitHub marketplace.",
+        description: "Browse the remote GitHub marketplace. Run before create_tool — install community tools instead of rebuilding common functionality.",
         inputSchema: z.object({
             query: z.string().optional().describe("Search by name, description, or tags"),
             category: z.enum(["api", "file", "data", "utility", "automation", "integration", "other"]).optional()
@@ -1898,7 +1908,7 @@ server.registerTool(
 server.registerTool(
     "marketplace_install_remote",
     {
-        description: "Install a tool from the remote GitHub marketplace.",
+        description: "Install a tool from the remote marketplace. Always prefer installing over rebuilding.",
         inputSchema: z.object({
             id: z.string().describe("Tool name/ID from remote marketplace"),
             overwrite: z.boolean().default(false)
@@ -1962,7 +1972,7 @@ server.registerTool(
 server.registerTool(
     "report_tool_issue",
     {
-        description: "Report a failure or issue with a marketplace tool. Increments its failure report count and recalculates success rate.",
+        description: "Report a failure with a marketplace tool. Run when an installed tool is consistently failing so the community knows.",
         inputSchema: z.object({
             id: z.string().describe("Marketplace tool ID"),
             github_token: z.string().describe("GitHub token")
@@ -1983,7 +1993,7 @@ server.registerTool(
 server.registerTool(
     "publish_tool_stats",
     {
-        description: "Publish local tool execution stats to its marketplace entry so others can see real-world usage data.",
+        description: "Share real usage data for a marketplace tool. Run after a tool accumulates meaningful usage to contribute back to the community.",
         inputSchema: z.object({
             id: z.string().describe("Marketplace tool ID"),
             tool_name: z.string().describe("Local tool name to read stats from"),
@@ -2002,9 +2012,8 @@ server.registerTool(
 
 server.registerTool(
     "create_resource",
-
     {
-        description: "Create an MCP resource.",
+        description: "Create an MCP resource — a named, versioned piece of content accessible to any agent in context.",
         inputSchema: z.object({
             uri: z.string().describe("Resource URI"),
             name: z.string(),
@@ -2053,7 +2062,7 @@ server.registerTool(
 server.registerTool(
     "list_resources",
     {
-        description: "List all MCP resources.",
+        description: "List all MCP resources available in context.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2073,7 +2082,7 @@ server.registerTool(
 server.registerTool(
     "get_resource",
     {
-        description: "Get a specific MCP resource by URI.",
+        description: "Get a specific MCP resource by URI including its full content.",
         inputSchema: z.object({
             uri: z.string().describe("Resource URI to retrieve")
         }),
@@ -2094,7 +2103,7 @@ server.registerTool(
 server.registerTool(
     "create_prompt",
     {
-        description: "Create an MCP prompt template.",
+        description: "Create a reusable MCP prompt template with named arguments and placeholders.",
         inputSchema: z.object({
             name: z.string(),
             description: z.string(),
@@ -2123,7 +2132,7 @@ server.registerTool(
 server.registerTool(
     "delete_prompt",
     {
-        description: "Delete an MCP prompt.",
+        description: "Delete an MCP prompt template.",
         inputSchema: z.object({ name: z.string() }),
     },
     async ({ name }) => {
@@ -2143,7 +2152,7 @@ server.registerTool(
 server.registerTool(
     "list_prompts",
     {
-        description: "List all MCP prompts.",
+        description: "List all MCP prompt templates.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2163,7 +2172,7 @@ server.registerTool(
 server.registerTool(
     "render_prompt",
     {
-        description: "Render a prompt template with arguments.",
+        description: "Render a prompt template with argument values. Use before passing a prompt to an LLM call.",
         inputSchema: z.object({
             name: z.string(),
             args: z.string().default("{}").describe("JSON object of argument values")
@@ -2194,7 +2203,7 @@ server.registerTool(
 server.registerTool(
     "search_tools",
     {
-        description: "Search tools using natural language. Scores results by relevance across name, description, tags, and category.",
+        description: "Search tools by natural language. ALWAYS run this before create_tool. If confidence > 40% — use or compose the existing tool instead of building.",
         inputSchema: z.object({
             query: z.string().describe("Natural language search query"),
             limit: z.number().optional().describe("Max results to return (default 10)")
@@ -2233,7 +2242,7 @@ server.registerTool(
 server.registerTool(
     "get_tool_graph",
     {
-        description: "Returns the dependency graph of all tools — which tools depend on which, roots, and orphans.",
+        description: "Get the full dependency graph of all tools. Run before building to understand composition opportunities. Prefer extending an existing graph over adding isolated tools.",
         inputSchema: z.object({
             tool_name: z.string().optional().describe("If provided, returns only the subgraph for this tool")
         }),
@@ -2310,7 +2319,7 @@ server.registerTool(
 server.registerTool(
     "create_persona",
     {
-        description: "Create a named agent persona — a saved toolset configuration with an optional system prompt.",
+        description: "Save a named agent configuration grouping related tools with an optional system prompt. Create a persona after completing any multi-tool task so future agents can activate this context instantly.",
         inputSchema: z.object({
             name: z.string().describe("Unique persona name"),
             description: z.string().describe("What this persona is for"),
@@ -2331,7 +2340,7 @@ server.registerTool(
 server.registerTool(
     "list_personas",
     {
-        description: "List all saved agent personas.",
+        description: "List all saved personas. ALWAYS run this at task start — activate a matching persona before reaching for individual tools.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2348,7 +2357,7 @@ server.registerTool(
 server.registerTool(
     "activate_persona",
     {
-        description: "Activate a persona — returns its tool list and system prompt so the agent can configure itself accordingly.",
+        description: "Load a persona's tool list and system prompt. Activating a persona scopes your work to the right tool set for the context.",
         inputSchema: z.object({
             name: z.string().describe("Persona name to activate")
         }),
@@ -2376,7 +2385,7 @@ server.registerTool(
 server.registerTool(
     "delete_persona",
     {
-        description: "Delete a saved agent persona.",
+        description: "Delete a saved agent persona. The tools inside it are not affected.",
         inputSchema: z.object({
             name: z.string().describe("Persona name to delete")
         }),
@@ -2395,7 +2404,7 @@ server.registerTool(
 server.registerTool(
     "update_persona",
     {
-        description: "Update an existing agent persona — change its description, tool list, or system prompt.",
+        description: "Update a persona's tool list, description, or system prompt. Run after adding or removing tools from a task context.",
         inputSchema: z.object({
             name: z.string().describe("Persona name to update"),
             description: z.string().optional(),
@@ -2421,7 +2430,7 @@ server.registerTool(
 server.registerTool(
     "knowledge_cache_stats",
     {
-        description: "Get statistics about the knowledge search cache.",
+        description: "Get statistics about the knowledge prompt cache.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2437,7 +2446,7 @@ server.registerTool(
 server.registerTool(
     "clear_knowledge_cache",
     {
-        description: "Clear the knowledge cache to force fresh searches on next tool creation.",
+        description: "Clear the knowledge cache to force fresh principles on next tool creation.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2453,7 +2462,7 @@ server.registerTool(
 server.registerTool(
     "get_anomalies",
     {
-        description: "List all tools currently flagged as anomalous — running significantly slower or failing more than their established baseline.",
+        description: "List tools currently performing outside their baseline. Review anomalies before starting work — a degraded tool will slow down your task.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2483,7 +2492,7 @@ server.registerTool(
 server.registerTool(
     "run_anomaly_check",
     {
-        description: "Manually trigger an anomaly check across all tools. Normally runs automatically every 15 minutes.",
+        description: "Manually trigger anomaly detection across all tools. Run when tools are behaving unexpectedly.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2503,7 +2512,7 @@ server.registerTool(
 server.registerTool(
     "clear_anomaly",
     {
-        description: "Clear the anomaly flag for a specific tool (e.g. after fixing it). Does not reset the baseline.",
+        description: "Clear the anomaly flag after fixing a tool. Always run this after a successful update_tool fix.",
         inputSchema: z.object({
             tool_name: z.string().describe("Tool name to clear the anomaly flag for")
         }),
@@ -2524,7 +2533,7 @@ server.registerTool(
 server.registerTool(
     "reset_anomaly_baseline",
     {
-        description: "Reset the performance baseline for a tool to its current stats. Use this after intentional changes that affect duration or fail rate.",
+        description: "Reset the performance baseline after an intentional change. Run after any update that deliberately changes a tool's speed or behavior.",
         inputSchema: z.object({
             tool_name: z.string().describe("Tool name to reset the baseline for")
         }),
@@ -2545,7 +2554,7 @@ server.registerTool(
 server.registerTool(
     "get_mutation_proposals",
     {
-        description: "List tools that are candidates for proactive mutation (rewriting) based on performance anomalies or high failure rates. Helps maintain the health of the tool ecosystem.",
+        description: "List tools that need proactive rewriting based on failure patterns. Review proposals before starting a session — fix degraded tools before building new ones.",
         inputSchema: z.object({}),
     },
     async () => {
@@ -2567,7 +2576,7 @@ server.registerTool(
 server.registerTool(
     "get_mutation_context",
     {
-        description: "Get full historical and technical context for a tool mutation. Provides code, execution stats, recent errors, and anomaly details to enable a smart, informed rewrite.",
+        description: "Get full diagnostic context for rewriting a failing tool — code, stats, errors, anomaly details. Always run this before update_tool on a failing tool.",
         inputSchema: z.object({
             tool_name: z.string().describe("Tool name to get context for")
         }),
@@ -2601,7 +2610,7 @@ server.registerTool(
 server.registerTool(
     "set_memory",
     {
-        description: "Persist a key/value pair in cross-session memory. Survives server restarts. Use namespaces to group related context.",
+        description: "Persist a key-value pair across sessions. Use for task context, user preferences, and state that must survive server restarts. Use namespaces to group related data.",
         inputSchema: z.object({
             key: z.string().describe("Memory key"),
             value: z.string().describe("Value to store (string, JSON, or plain text)"),
@@ -2623,7 +2632,7 @@ server.registerTool(
 server.registerTool(
     "get_memory",
     {
-        description: "Retrieve a value from cross-session memory by key.",
+        description: "Retrieve a persisted value by key and namespace. Check memory before asking the user for context they may have already provided.",
         inputSchema: z.object({
             key: z.string().describe("Memory key to retrieve"),
             namespace: z.string().optional().default("default").describe("Namespace the key belongs to")
@@ -2667,7 +2676,7 @@ server.registerTool(
 server.registerTool(
     "list_memory",
     {
-        description: "List all keys in cross-session memory, optionally filtered by namespace.",
+        description: "List all memory entries optionally filtered by namespace. Run at task start to load relevant context automatically.",
         inputSchema: z.object({
             namespace: z.string().optional().describe("Filter by namespace (omit to list all)")
         }),
@@ -2690,28 +2699,6 @@ server.registerTool(
 );
 
 server.registerTool(
-    "match_intent",
-    {
-        description: "Sophisticated intent matching for tools. Returns ranked matches with confidence scores and composition suggestions.",
-        inputSchema: z.object({
-            query: z.string().describe("Natural language query or intent"),
-        }),
-    },
-    async ({ query }) => {
-        try {
-            const files = await getAllToolFiles();
-            const tools = await Promise.all(
-                files.map(f => readToolData(f.replace(".json", "")))
-            );
-            const response = matchIntent(query, tools);
-            return createToolResponse(JSON.stringify(response, null, 2));
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-server.registerTool(
     "clear_memory",
     {
         description: "Clear all cross-session memory entries, or all entries within a specific namespace.",
@@ -2724,6 +2711,28 @@ server.registerTool(
             const count = await clearMemory(namespace);
             const scope = namespace ? `namespace '${namespace}'` : "all namespaces";
             return createToolResponse(`Cleared ${count} memory ${count === 1 ? "entry" : "entries"} from ${scope}.`);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+server.registerTool(
+    "match_intent",
+    {
+        description: "Deep intent matching with confidence scores and composition suggestions. Run when search_tools returns low confidence to find composition paths.",
+        inputSchema: z.object({
+            query: z.string().describe("Natural language query or intent"),
+        }),
+    },
+    async ({ query }) => {
+        try {
+            const files = await getAllToolFiles();
+            const tools = await Promise.all(
+                files.map(f => readToolData(f.replace(".json", "")))
+            );
+            const response = matchIntent(query, tools);
+            return createToolResponse(JSON.stringify(response, null, 2));
         } catch (error) {
             return createErrorResponse(error);
         }
