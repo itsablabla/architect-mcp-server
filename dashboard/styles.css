@@ -1,24 +1,24 @@
 :root {
-    --bg-primary: #0f1117;
-    --bg-secondary: #1a1d27;
-    --bg-card: #222533;
-    --bg-hover: #2a2d3d;
-    --text-primary: #e8eaed;
-    --text-secondary: #9aa0a6;
+    --bg-primary: #0a0c10;
+    --bg-secondary: #12141c;
+    --bg-card: rgba(26, 29, 40, 0.7);
+    --bg-hover: rgba(42, 45, 61, 0.8);
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
     --text-muted: #6b7280;
-    --accent: #7c3aed;
-    --accent-hover: #6d28d9;
-    --accent-glow: rgba(124, 58, 237, 0.3);
+    --accent: #8b5cf6;
+    --accent-hover: #a78bfa;
+    --accent-glow: rgba(139, 92, 246, 0.4);
     --success: #10b981;
     --warning: #f59e0b;
     --danger: #ef4444;
     --info: #3b82f6;
     --border: #2d3148;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --sidebar-width: 240px;
-    --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
-    --transition: all 0.2s ease;
+    --radius: 16px;
+    --radius-sm: 10px;
+    --sidebar-width: 250px;
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -42,7 +42,9 @@ body {
 
 .sidebar {
     width: var(--sidebar-width);
-    background: var(--bg-secondary);
+    background: rgba(18, 20, 28, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border-right: 1px solid var(--border);
     position: fixed;
     height: 100vh;
@@ -61,8 +63,10 @@ body {
     gap: 10px;
 }
 
-.logo-icon {
-    font-size: 24px;
+.logo-img {
+    height: 32px;
+    width: auto;
+    object-fit: contain;
 }
 
 .logo-text {
@@ -70,6 +74,7 @@ body {
     font-weight: 700;
     background: linear-gradient(135deg, var(--accent), #a78bfa);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -104,8 +109,9 @@ body {
 }
 
 .nav-icon {
-    font-size: 16px;
     width: 20px;
+    height: 20px;
+    stroke-width: 2;
     text-align: center;
 }
 
@@ -122,7 +128,9 @@ body {
     align-items: center;
     padding: 20px 32px;
     border-bottom: 1px solid var(--border);
-    background: var(--bg-secondary);
+    background: rgba(18, 20, 28, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     position: sticky;
     top: 0;
     z-index: 50;
@@ -195,6 +203,8 @@ body {
 
 .stat-card {
     background: var(--bg-card);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px;
@@ -203,8 +213,8 @@ body {
 
 .stat-card:hover {
     border-color: var(--accent);
-    box-shadow: 0 0 20px var(--accent-glow);
-    transform: translateY(-2px);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3), 0 0 20px var(--accent-glow);
+    transform: translateY(-4px);
 }
 
 .stat-label {
@@ -227,6 +237,8 @@ body {
 
 .card {
     background: var(--bg-card);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
@@ -376,6 +388,8 @@ tr:hover td {
 
 .tool-card {
     background: var(--bg-card);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px;
@@ -385,7 +399,8 @@ tr:hover td {
 
 .tool-card:hover {
     border-color: var(--accent);
-    box-shadow: 0 0 16px var(--accent-glow);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3), 0 0 16px var(--accent-glow);
+    transform: translateY(-4px);
 }
 
 .tool-card-header {

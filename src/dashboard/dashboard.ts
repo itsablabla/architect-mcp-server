@@ -23,6 +23,7 @@ import { CustomTool } from "../types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_DIR = path.resolve(__dirname, "..", "..", "dashboard");
+const ASSETS_DIR = path.resolve(DASHBOARD_DIR, "..", "assets");
 
 let dashboardServer: ReturnType<typeof serve> | null = null;
 
@@ -475,7 +476,12 @@ export function startDashboard(
 
     app.get("/*", async (c) => {
         const reqPath = c.req.path === "/" ? "/index.html" : c.req.path;
-        const filePath = path.join(DASHBOARD_DIR, reqPath);
+        let filePath = path.join(DASHBOARD_DIR, reqPath);
+
+        if (reqPath.startsWith("/assets/")) {
+            const fileName = reqPath.replace(/^\/assets\//, "");
+            filePath = path.join(ASSETS_DIR, fileName);
+        }
 
         try {
             const content = await fs.readFile(filePath);

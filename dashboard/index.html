@@ -28,24 +28,24 @@
         <nav class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <span class="logo-icon">⚡</span>
+                    <img src="/assets/logo.png" alt="Logo" class="logo-img">
                     <span class="logo-text">Architect-MCP</span>
                 </div>
             </div>
             <ul class="nav-links">
-                <li><a href="#" class="nav-link active" data-section="overview"><span class="nav-icon">📊</span>Overview</a></li>
-                <li><a href="#" class="nav-link" data-section="tools"><span class="nav-icon">🔧</span>Tools</a></li>
-                <li><a href="#" class="nav-link" data-section="audit"><span class="nav-icon">📋</span>Audit Log</a></li>
-                <li><a href="#" class="nav-link" data-section="permissions"><span class="nav-icon">🔒</span>Permissions</a></li>
-                <li><a href="#" class="nav-link" data-section="schedules"><span class="nav-icon">⏰</span>Schedules</a></li>
-                <li><a href="#" class="nav-link" data-section="webhooks"><span class="nav-icon">🔗</span>Webhooks</a></li>
-                <li><a href="#" class="nav-link" data-section="pipelines"><span class="nav-icon">🔀</span>Pipelines</a></li>
-                <li><a href="#" class="nav-link" data-section="cache"><span class="nav-icon">💾</span>Cache</a></li>
-                <li><a href="#" class="nav-link" data-section="secrets"><span class="nav-icon">🔐</span>Secrets</a></li>
-                <li><a href="#" class="nav-link" data-section="aliases"><span class="nav-icon">🏷️</span>Aliases</a></li>
-                <li><a href="#" class="nav-link" data-section="marketplace"><span class="nav-icon">🏪</span>Marketplace</a></li>
-                <li><a href="#" class="nav-link" data-section="resources"><span class="nav-icon">📦</span>Resources</a></li>
-                <li><a href="#" class="nav-link" data-section="prompts"><span class="nav-icon">💬</span>Prompts</a></li>
+                <li><a href="#" class="nav-link active" data-section="overview"><i data-lucide="layout-dashboard" class="nav-icon"></i>Overview</a></li>
+                <li><a href="#" class="nav-link" data-section="tools"><i data-lucide="wrench" class="nav-icon"></i>Tools</a></li>
+                <li><a href="#" class="nav-link" data-section="audit"><i data-lucide="clipboard-list" class="nav-icon"></i>Audit Log</a></li>
+                <li><a href="#" class="nav-link" data-section="permissions"><i data-lucide="shield" class="nav-icon"></i>Permissions</a></li>
+                <li><a href="#" class="nav-link" data-section="schedules"><i data-lucide="clock" class="nav-icon"></i>Schedules</a></li>
+                <li><a href="#" class="nav-link" data-section="webhooks"><i data-lucide="link" class="nav-icon"></i>Webhooks</a></li>
+                <li><a href="#" class="nav-link" data-section="pipelines"><i data-lucide="git-merge" class="nav-icon"></i>Pipelines</a></li>
+                <li><a href="#" class="nav-link" data-section="cache"><i data-lucide="database" class="nav-icon"></i>Cache</a></li>
+                <li><a href="#" class="nav-link" data-section="secrets"><i data-lucide="lock" class="nav-icon"></i>Secrets</a></li>
+                <li><a href="#" class="nav-link" data-section="aliases"><i data-lucide="tag" class="nav-icon"></i>Aliases</a></li>
+                <li><a href="#" class="nav-link" data-section="marketplace"><i data-lucide="shopping-bag" class="nav-icon"></i>Marketplace</a></li>
+                <li><a href="#" class="nav-link" data-section="resources"><i data-lucide="box" class="nav-icon"></i>Resources</a></li>
+                <li><a href="#" class="nav-link" data-section="prompts"><i data-lucide="message-square" class="nav-icon"></i>Prompts</a></li>
             </ul>
         </nav>
         <main class="content">
@@ -59,7 +59,6 @@
         </main>
     </div>
 
-    <!-- Edit Code Modal -->
     <div id="edit-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -76,7 +75,6 @@
         </div>
     </div>
 
-    <!-- Run Tool Modal -->
     <div id="run-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -95,6 +93,8 @@
         </div>
     </div>
 
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/javascript/javascript.min.js"></script>
     <script src="/app.js"></script>

@@ -51,6 +51,7 @@ import { setMemory, getMemory, deleteMemory, listMemory, clearMemory } from "./c
 import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, startAnomalyChecker, stopAnomalyChecker } from "./core/anomaly.js";
 import { getMutationCandidates, getMutationContext } from "./core/mutation.js";
 import { matchIntent } from "./core/intent.js";
+import { BROWSER_TOOL_DEFINITIONS } from "./tools/browser-registrations.js";
 
 const server = new McpServer({
     name: "architect-mcp-server",
@@ -2967,6 +2968,26 @@ server.registerTool(
         }
     }
 );
+
+for (const def of BROWSER_TOOL_DEFINITIONS) {
+    const zodSchema = jsonSchemaToZod(def.inputSchema);
+    server.registerTool(
+        def.name,
+        {
+            description: def.description,
+            inputSchema: zodSchema,
+        },
+        async (params: Record<string, unknown>) => {
+            try {
+                const result = await def.handler(params as Record<string, any>);
+                return { content: [{ type: "text" as const, text: result }] };
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                return { content: [{ type: "text" as const, text: `Browser tool error: ${msg}` }] };
+            }
+        }
+    );
+}
 
 async function loadExistingTools(): Promise<void> {
     const files = await getAllToolFiles();
