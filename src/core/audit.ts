@@ -72,6 +72,7 @@ export async function getAuditLogs(
         toolName?: string;
         action?: AuditAction;
         limit?: number;
+        offset?: number;
         since?: string;
     } = {}
 ): Promise<AuditEntry[]> {
@@ -99,6 +100,11 @@ export async function getAuditLogs(
     if (options.limit) {
         sql += " LIMIT ?";
         params.push(options.limit);
+    }
+
+    if (options.offset) {
+        sql += " OFFSET ?";
+        params.push(options.offset);
     }
 
     const rows = db.prepare(sql).all(...params) as any[];

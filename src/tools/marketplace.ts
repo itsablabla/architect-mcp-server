@@ -165,6 +165,9 @@ export async function publishToRemote(
             }
         } catch (e) {
             if (e instanceof Error && e.message.includes("owned by")) throw e;
+            // Re-throw parse errors — don't silently allow overwrites of unreadable entries
+            if (e instanceof SyntaxError) throw new Error(`Cannot verify ownership of '${tool.name}': corrupted marketplace entry. Refusing to overwrite.`);
+            throw e;
         }
     }
 
@@ -358,7 +361,11 @@ export async function deleteFromRemote(
         if (entry.owner_id && entry.owner_id !== owner.id) {
             return { deleted: false, error: `Tool '${id}' is owned by @${entry.owner_login}. Only the original publisher can delete it.` };
         }
-    } catch { }
+    } catch (e) {
+        // Re-throw parse errors — don't silently allow deletion of unreadable entries
+        if (e instanceof SyntaxError) return { deleted: false, error: `Cannot verify ownership of '${id}': corrupted marketplace entry. Refusing to delete.` };
+        throw e;
+    }
 
     const result = await githubApi(`tools/${id}.json`, token, "DELETE", {
         message: `Remove tool: ${id}`,

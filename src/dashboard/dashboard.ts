@@ -77,8 +77,9 @@ export function startDashboard(
     app.get("/api/audit", async (c) => {
         try {
             const limit = parseInt(c.req.query("limit") || "100");
+            const offset = parseInt(c.req.query("offset") || "0") || undefined;
             const toolName = c.req.query("tool") || undefined;
-            const logs = await getAuditLogs({ limit, toolName });
+            const logs = await getAuditLogs({ limit, offset, toolName });
             return c.json(logs);
         } catch {
             return c.json([], 500);
