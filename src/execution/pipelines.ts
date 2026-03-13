@@ -108,6 +108,23 @@ export async function executePipeline(
         const stepStart = Date.now();
 
         if (step.condition) {
+            // Only allow safe expressions: property access, comparisons, boolean logic, literals.
+            // Blocks backticks, semicolons, require, process, __proto__, etc.
+            const SAFE_CONDITION = /^[\w$.\[\]'"0-9\s()!&|=<>+\-*/%,?:.]+$/;
+            if (!SAFE_CONDITION.test(step.condition)) {
+                stepResults.push({
+                    tool: step.tool,
+                    success: false,
+                    error: `Unsafe condition expression rejected: "${step.condition}"`,
+                    durationMs: 0
+                });
+                return {
+                    pipelineName: pipeline.name,
+                    steps: stepResults,
+                    totalMs: Date.now() - startTime,
+                    success: false
+                };
+            }
             try {
                 const condResult = new Function("ctx", `return ${step.condition}`)(context);
                 if (!condResult) {

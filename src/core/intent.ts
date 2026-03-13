@@ -1,14 +1,21 @@
 import { CustomTool, IntentMatch, IntentResponse, ToolListItem } from "../types.js";
 
+const MAX_TOOLS_TO_SCAN = 150;
+
 export function matchIntent(query: string, tools: CustomTool[]): IntentResponse {
     const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
     if (terms.length === 0) {
         return { query, matches: [] };
     }
 
+    // Cap to most recently updated tools to bound scan time on large tool sets
+    const toolsToScan = tools.length > MAX_TOOLS_TO_SCAN
+        ? [...tools].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")).slice(0, MAX_TOOLS_TO_SCAN)
+        : tools;
+
     const matches: IntentMatch[] = [];
 
-    for (const tool of tools) {
+    for (const tool of toolsToScan) {
         let score = 0;
         const matchedTerms: string[] = [];
 
@@ -46,7 +53,7 @@ export function matchIntent(query: string, tools: CustomTool[]): IntentResponse 
             const maxPossiblePerTerm = 10;
             const confidence = Math.min(finalScore / (terms.length * maxPossiblePerTerm), 1.0);
 
-            matches.push({
+            const match = {
                 tool: {
                     name: tool.name,
                     description: tool.description,
@@ -61,7 +68,14 @@ export function matchIntent(query: string, tools: CustomTool[]): IntentResponse 
                 score: finalScore,
                 confidence,
                 matchedTerms
-            });
+            };
+
+            // Early-exit: a near-perfect match means no need to scan further
+            if (confidence >= 0.95) {
+                return { query, matches: [match] };
+            }
+
+            matches.push(match);
         }
     }
 

@@ -4,6 +4,15 @@ import {
 } from "../types.js";
 import { getDb } from "./db.js";
 
+function safeParseArray(s: string): number[] {
+    try {
+        const v = JSON.parse(s || "[]");
+        return Array.isArray(v) ? v : [];
+    } catch {
+        return [];
+    }
+}
+
 export async function getToolStats(toolName: string): Promise<ExecutionStats | null> {
     const db = getDb();
     const row = db.prepare("SELECT * FROM execution_stats WHERE tool_name = ?").get(toolName) as any;
@@ -71,8 +80,8 @@ export async function checkRateLimit(
         return { allowed: true };
     }
 
-    let minuteCalls: number[] = JSON.parse(row.minute_calls || "[]");
-    let hourCalls: number[] = JSON.parse(row.hour_calls || "[]");
+    let minuteCalls: number[] = safeParseArray(row.minute_calls);
+    let hourCalls: number[] = safeParseArray(row.hour_calls);
 
     minuteCalls = minuteCalls.filter(t => t > oneMinuteAgo);
     hourCalls = hourCalls.filter(t => t > oneHourAgo);
@@ -108,8 +117,8 @@ export async function recordRateLimitCall(toolName: string): Promise<void> {
         return;
     }
 
-    const minuteCalls: number[] = JSON.parse(row.minute_calls || "[]");
-    const hourCalls: number[] = JSON.parse(row.hour_calls || "[]");
+    const minuteCalls: number[] = safeParseArray(row.minute_calls);
+    const hourCalls: number[] = safeParseArray(row.hour_calls);
     minuteCalls.push(now);
     hourCalls.push(now);
 

@@ -162,7 +162,13 @@ function createErrorResponse(error: unknown): { content: Array<{ type: "text"; t
     return createToolResponse(`Error: ${message}`);
 }
 
-async function callToolInternal(name: string, params: Record<string, unknown>): Promise<any> {
+const MAX_TOOL_CALL_DEPTH = 10;
+
+async function callToolInternal(name: string, params: Record<string, unknown>, depth: number = 0): Promise<any> {
+    if (depth >= MAX_TOOL_CALL_DEPTH) {
+        throw new Error(`Tool call depth limit (${MAX_TOOL_CALL_DEPTH}) exceeded. Possible circular dependency involving '${name}'.`);
+    }
+
     const tool = registeredTools.get(name);
     if (!tool) {
         throw new Error(`Tool '${name}' not found or not active`);
@@ -175,7 +181,7 @@ async function callToolInternal(name: string, params: Record<string, unknown>): 
         timeoutMs: tool.timeoutMs ?? 10000,
         capabilities: approvedCaps,
         imports: tool.imports ?? [],
-        toolCaller: callToolInternal
+        toolCaller: (n, p) => callToolInternal(n, p, depth + 1)
     });
 
     try {
@@ -229,7 +235,7 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
                 timeoutMs: tool.timeoutMs ?? 10000,
                 capabilities: approvedCaps,
                 imports: tool.imports ?? [],
-                toolCaller: callToolInternal
+                toolCaller: (n, p) => callToolInternal(n, p, 1)
             });
 
             try {
