@@ -25,9 +25,10 @@ import {
     approveToolCapabilities,
     revokeToolPermissions,
     listAllPermissions,
-    getToolPermissions
+    getToolPermissions,
+    getApprovedCapabilities
 } from "./core/permissions.js";
-import { ToolSandbox, validateCode } from "./core/sandbox.js";
+import { ToolSandbox, validateCode, disposeSandboxPool } from "./core/sandbox.js";
 import { logAudit, getAuditLogs, formatAuditEntry } from "./core/audit.js";
 import { recordExecution, checkRateLimit, recordRateLimitCall, getToolStats, getAllStats, formatStats } from "./core/history.js";
 import { getTemplate, listTemplates, formatTemplate } from "./tools/templates.js";
@@ -43,9 +44,10 @@ import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFrom
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
 import { createPrompt, getPrompt, deletePrompt, listAllPrompts, renderPrompt, formatPrompt } from "./mcp/prompts.js";
 import { getCachedResult, setCachedResult, clearCacheForTool, clearAllCache, getCacheStats, cleanExpiredCache, flushCache, startCacheFlushInterval, stopCacheFlushInterval } from "./core/cache.js";
-import { setSecret, getSecret, deleteSecret, listSecrets } from "./core/secrets.js";
+import { setSecret, getSecret, deleteSecret, listSecrets, redactSecrets } from "./core/secrets.js";
+import { signTool, verifyToolSignature } from "./core/signing.js";
 import { startDashboard, stopDashboard } from "./dashboard/dashboard.js";
-import { buildKnowledgePrompt, getCachedKnowledge, setCachedKnowledge, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
+import { buildKnowledgePrompt, clearAllKnowledgeCache, getKnowledgeCacheStats, clearExpiredKnowledgeCache } from "./core/knowledge.js";
 import { createPersona, getPersona, updatePersona, deletePersona, listPersonas, formatPersona } from "./tools/personas.js";
 import { setMemory, getMemory, deleteMemory, listMemory, clearMemory } from "./core/memory.js";
 import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, startAnomalyChecker, stopAnomalyChecker } from "./core/anomaly.js";
@@ -67,6 +69,13 @@ const server = new McpServer({
 const registeredTools = new Map<string, CustomTool>();
 let cacheSyncInterval: NodeJS.Timeout | null = null;
 const sessionLog: { created: string[], updated: string[], errors: string[] } = { created: [], updated: [], errors: [] };
+let knowledgeShown = false;
+
+function knowledgeBlock(): string {
+    if (knowledgeShown) return "";
+    knowledgeShown = true;
+    return buildKnowledgePrompt() + "\n\n---\n\n";
+}
 
 function toolExists(name: string): boolean {
     const db = getDb();
@@ -78,6 +87,16 @@ function readToolData(name: string): CustomTool {
     const db = getDb();
     const row = db.prepare("SELECT * FROM tools WHERE name = ?").get(name) as any;
     if (!row) throw new Error(`Tool '${name}' not found`);
+    return rowToTool(row);
+}
+
+function readAllTools(): CustomTool[] {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM tools").all() as any[];
+    return rows.map(rowToTool);
+}
+
+function rowToTool(row: any): CustomTool {
     return migrateToolData({
         name: row.name,
         description: row.description,
@@ -105,11 +124,16 @@ function readToolData(name: string): CustomTool {
 
 async function writeToolData(tool: CustomTool): Promise<void> {
     const db = getDb();
-    try {
-        const existing = readToolData(tool.name);
-        await saveVersion(tool.name, existing);
-    } catch { }
-    db.prepare(
+    const txn = db.transaction(() => {
+        const row = db.prepare("SELECT * FROM tools WHERE name = ?").get(tool.name) as any;
+        if (row) {
+            const existing = rowToTool(row);
+            db.prepare(
+                `INSERT INTO tool_versions (tool_name, version, tool_snapshot, saved_at)
+                 VALUES (?, ?, ?, ?)`
+            ).run(tool.name, existing.version, JSON.stringify(existing), new Date().toISOString());
+        }
+        db.prepare(
         `INSERT OR REPLACE INTO tools
          (name, description, code, schema, capabilities, category, tags, dependencies, version,
           author, created_at, updated_at, deprecated, failing_since, rate_limit, cache_config, retry_config, tests,
@@ -136,6 +160,8 @@ async function writeToolData(tool: CustomTool): Promise<void> {
         tool.returnsSchema ? JSON.stringify(tool.returnsSchema) : null,
         tool.timeoutMs || null
     );
+    });
+    txn();
 }
 
 function deleteToolFile(name: string): void {
@@ -153,8 +179,146 @@ function ensureDir(): Promise<void> {
     return Promise.resolve();
 }
 
+const ACTION_GATEWAY: Record<string, string> = {
+    create_tool: "tool", update_tool: "tool", mark_tool_deprecated: "tool",
+    validate_tool: "tool", save_tool: "tool", approve_tool: "tool",
+    delete_tool: "tool", run_tests: "tool", reload_tools: "tool",
+    revoke_permissions: "tool", list_permissions: "tool",
+    list_versions: "tool", rollback_tool: "tool", diff_versions: "tool",
+    list_templates: "tool", create_from_template: "tool",
+    export_tool: "tool", import_tool: "tool",
+    list_tools: "find", search_tools: "find", get_tool_source: "find",
+    get_tool_graph: "find", match_intent: "find",
+    batch_execute: "run",
+    create_alias: "run", delete_alias: "run", list_aliases: "run", execute_alias: "run",
+    create_pipeline: "run", execute_pipeline: "run",
+    delete_pipeline: "run", list_pipelines: "run",
+    create_schedule: "automate", delete_schedule: "automate", list_schedules: "automate",
+    create_webhook: "automate", delete_webhook: "automate", list_webhooks: "automate",
+    set_secret: "store", get_secret: "store", delete_secret: "store", list_secrets: "store",
+    set_memory: "store", get_memory: "store", delete_memory: "store",
+    list_memory: "store", clear_memory: "store",
+    create_resource: "store", delete_resource: "store",
+    list_resources: "store", get_resource: "store",
+    create_prompt: "store", delete_prompt: "store",
+    list_prompts: "store", render_prompt: "store",
+    marketplace_export: "share", marketplace_import: "share",
+    marketplace_list: "share", marketplace_delete: "share",
+    marketplace_publish: "share", marketplace_browse: "share",
+    marketplace_install_remote: "share", marketplace_delete_remote: "share",
+    report_tool_issue: "share", publish_tool_stats: "share",
+    add_marketplace_peer: "share", list_marketplace_peers: "share",
+    get_tool_stats: "admin", get_audit_logs: "admin", cache_stats: "admin",
+    clear_cache: "admin", knowledge_cache_stats: "admin", clear_knowledge_cache: "admin",
+    get_anomalies: "admin", run_anomaly_check: "admin",
+    clear_anomaly: "admin", reset_anomaly_baseline: "admin",
+    get_mutation_proposals: "admin", get_mutation_context: "admin",
+    create_persona: "admin", list_personas: "admin", activate_persona: "admin",
+    delete_persona: "admin", update_persona: "admin",
+    get_system_status: "admin"
+};
+
+const GATEWAY_DESCRIPTIONS: Record<string, string> = {
+    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. Created tools become directly callable MCP tools.",
+    find: "Discover existing tools before building: list, full-text search, view source, dependency graph, intent matching.",
+    run: "Compose and execute tools: batches, aliases with preset params, multi-step pipelines.",
+    automate: "Run tools in the background: cron schedules and HTTP webhooks.",
+    store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
+    share: "Tool marketplace: publish, browse, install from remote registries and peers.",
+    admin: "Operations: execution stats, audit logs, caches, anomaly detection, repair proposals, personas, system status.",
+    browser: "Browser automation: navigate, click, type, scrape, screenshots, tabs."
+};
+
+interface ActionEntry {
+    gateway: string;
+    description: string;
+    schema: z.ZodType<any>;
+    handler: (args: any) => Promise<{ content: Array<{ type: "text"; text: string }> }>;
+}
+
+const actionRegistry = new Map<string, ActionEntry>();
+
+const defineAction = ((name: string, def: any, handler: any) => {
+    const rawSchema = def.inputSchema;
+    actionRegistry.set(name, {
+        gateway: ACTION_GATEWAY[name] ?? "admin",
+        description: def.description ?? "",
+        schema: rawSchema instanceof z.ZodType ? rawSchema : z.object(rawSchema ?? {}),
+        handler
+    });
+}) as unknown as typeof server.registerTool;
+
+function schemaJson(schema: z.ZodType<any>): string {
+    try {
+        return JSON.stringify(z.toJSONSchema(schema as any, { io: "input" }), null, 2);
+    } catch {
+        return "(schema unavailable)";
+    }
+}
+
+function gatewayHelp(gateway: string, actions: string[], target: string | null): string {
+    if (target) {
+        const entry = actionRegistry.get(target);
+        if (!entry || entry.gateway !== gateway) {
+            return `Unknown action '${target}'. Available: ${actions.join(", ")}`;
+        }
+        return `${target}: ${entry.description}\n\nArgs schema:\n${schemaJson(entry.schema)}`;
+    }
+    return actions.map(a => `${a} — ${actionRegistry.get(a)!.description}`).join("\n") +
+        `\n\nCall {action:"help", args:{action:"<name>"}} for an action's args schema.`;
+}
+
+function registerGateways(): void {
+    const byGateway = new Map<string, string[]>();
+    for (const [name, entry] of actionRegistry) {
+        const list = byGateway.get(entry.gateway) ?? [];
+        list.push(name);
+        byGateway.set(entry.gateway, list);
+    }
+    for (const [gateway, actions] of byGateway) {
+        server.registerTool(
+            gateway,
+            {
+                description: `${GATEWAY_DESCRIPTIONS[gateway] ?? ""} Actions: ${actions.join(", ")}. Use {action:"help"} or {action:"help", args:{action:"<name>"}} for parameter schemas.`,
+                inputSchema: z.object({
+                    action: z.string().describe("Action to perform, or 'help'"),
+                    args: z.record(z.string(), z.unknown()).optional().describe("Arguments for the action")
+                })
+            } as any,
+            (async ({ action, args }: { action: string; args?: Record<string, unknown> }) => {
+                if (action === "help") {
+                    const target = typeof args?.action === "string" ? args.action : null;
+                    return createToolResponse(gatewayHelp(gateway, actions, target));
+                }
+                const entry = actionRegistry.get(action);
+                if (!entry || entry.gateway !== gateway) {
+                    return createToolResponse(`Unknown action '${action}'. Available: ${actions.join(", ")}`);
+                }
+                let parsed: any;
+                try {
+                    parsed = entry.schema.parse(args ?? {});
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    return createToolResponse(`Invalid args for '${action}': ${msg}\n\nArgs schema:\n${schemaJson(entry.schema)}`);
+                }
+                try {
+                    return await entry.handler(parsed);
+                } catch (err) {
+                    return createErrorResponse(err);
+                }
+            }) as any
+        );
+    }
+}
+
 function createToolResponse(text: string): { content: Array<{ type: "text"; text: string }> } {
     return { content: [{ type: "text", text }] };
+}
+
+function stringifyResult(value: unknown): string {
+    const compact = JSON.stringify(value);
+    if (compact === undefined) return "undefined";
+    return compact.length > 1500 ? compact : JSON.stringify(value, null, 2);
 }
 
 function createErrorResponse(error: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -197,8 +361,7 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
 
 async function registerCustomTool(tool: CustomTool): Promise<void> {
     const zodSchema = jsonSchemaToZod(tool.schema);
-    const permission = await getToolPermissions(tool.name);
-    const approvedCaps = permission?.approvedCapabilities ?? [];
+    const approvedCaps = await getApprovedCapabilities(tool);
 
     server.registerTool(
         tool.name,
@@ -227,7 +390,7 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
             if (tool.cache) {
                 const cached = await getCachedResult(tool.name, params, tool.cache);
                 if (cached.hit) {
-                    return createToolResponse(JSON.stringify(cached.result, null, 2) + "\n\n(cached)");
+                    return createToolResponse(await redactSecrets(stringifyResult(cached.result)) + "\n\n(cached)");
                 }
             }
 
@@ -260,17 +423,17 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
                     await setCachedResult(tool.name, params, result.result, tool.cache);
                 }
 
-                let output = JSON.stringify(result.result, null, 2);
+                let output = stringifyResult(result.result);
                 if (result.logs.length > 0) {
                     output += `\n\nLogs:\n${result.logs.join("\n")}`;
                 }
-                return createToolResponse(deprecationWarning + output);
+                return createToolResponse(deprecationWarning + await redactSecrets(output));
             } catch (err) {
                 const duration = Date.now() - startTime;
                 const errorMsg = err instanceof Error ? err.message : String(err);
                 await recordExecution(tool.name, false, duration);
                 await logAudit("tool_execution_failed", tool.name, { error: errorMsg }, duration);
-                return createToolResponse(`Execution Error: ${errorMsg}\n\nTo fix this tool, call update_tool with name '${tool.name}' and a corrected version of the code below:\n\n\`\`\`javascript\n${tool.code}\n\`\`\``);
+                return createToolResponse(`Execution Error: ${await redactSecrets(errorMsg)}\n\nTo fix this tool, call find {action:"get_tool_source", args:{name:"${tool.name}"}}, then tool {action:"update_tool"} with corrected code.`);
             } finally {
                 sandbox.dispose();
             }
@@ -284,13 +447,21 @@ async function unregisterCustomTool(name: string): Promise<void> {
     registeredTools.delete(name);
 }
 
+async function testGate(tool: CustomTool): Promise<string | null> {
+    if (!tool.tests || tool.tests.length === 0) return null;
+    const result = await runToolTests(tool, { toolCaller: (n, p) => callToolInternal(n, p, 1) });
+    await logAudit("tests_run", tool.name, { passed: result.passed, failed: result.failed });
+    if (result.failed > 0) return formatTestResults(result);
+    return null;
+}
+
 async function notifyToolsChanged(): Promise<void> {
     await server.server.notification({
         method: "notifications/tools/list_changed",
     });
 }
 
-server.registerTool(
+defineAction(
     "create_tool",
     {
         description: "Create a new reusable tool. ALWAYS call search_tools first — rebuild nothing that exists. Design for the general case, never for the specific task. fetch() returns {ok,status,body} — never call .text() or .json(). Credentials via secrets.get() only. Include at least one test case.",
@@ -309,10 +480,12 @@ server.registerTool(
             github_token: z.string().optional().describe("GitHub token to auto-check marketplace before creating"),
             imports: z.array(z.string()).optional().describe("NPM packages to inject into the sandbox"),
             returns_schema: z.string().optional().describe("JSON schema string for output validation"),
-            timeout_ms: z.number().optional().describe("Max execution time in milliseconds")
+            timeout_ms: z.number().optional().describe("Max execution time in milliseconds"),
+            tests: z.string().optional().describe("JSON array of test cases: [{name, input, expect?, expectError?}]. Tests gate activation."),
+            force: z.boolean().optional().describe("Skip the similar-tool check and create anyway")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author, github_token, imports, returns_schema, timeout_ms }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, author, github_token, imports, returns_schema, timeout_ms, tests, force }) => {
         try {
             const validation = validateToolName(name);
             if (!validation.valid) {
@@ -320,7 +493,7 @@ server.registerTool(
             }
 
             if (await toolExists(name)) {
-                return createToolResponse(`Tool '${name}' already exists. Use update_tool to modify it.`);
+                return createToolResponse(`Tool '${name}' already exists. Use the 'update_tool' action to modify it.`);
             }
 
             if (github_token) {
@@ -332,26 +505,23 @@ server.registerTool(
                             .map(e => `  - ${e.name} by ${e.author}: ${e.description}`)
                             .join("\n");
                         return createToolResponse(
-                            `Marketplace match found for '${name}'. Install instead of rebuilding:\n\n${suggestions}\n\nUse install_from_remote to install one of these.`
+                            `Marketplace match found for '${name}'. Install instead of rebuilding:\n\n${suggestions}\n\nUse share {action:"marketplace_install_remote"} to install one of these.`
                         );
                     }
                 } catch {
                 }
             }
 
-            {
-                const existingFiles = await getAllToolFiles();
-                if (existingFiles.length > 0) {
-                    const tools = await Promise.all(
-                        existingFiles.map(f => readToolData(f.replace(".json", "")))
-                    );
+            if (!force) {
+                const tools = readAllTools();
+                if (tools.length > 0) {
                     const response = matchIntent(`${name} ${description}`, tools);
-                    const matches = response.matches.filter(m => m.confidence > 0.4).slice(0, 3);
+                    const matches = response.matches.filter(m => m.confidence > 0.6).slice(0, 3);
 
                     if (matches.length > 0) {
-                        const hint = matches.map(m => `  - ${m.tool.name} (confidence: ${(m.confidence * 100).toFixed(0)}%): ${m.tool.description}`).join("\n");
+                        const hint = matches.map(m => `  - ${m.tool.name} (${(m.confidence * 100).toFixed(0)}%): ${m.tool.description}`).join("\n");
                         return createToolResponse(
-                            `Before creating '${name}', consider using or composing these existing tools:\n\n${hint}\n\nUse callTool() in your code or set dependencies[] to chain them. If none fit, call create_tool again to proceed.`
+                            `Similar tools already exist:\n\n${hint}\n\nUse them directly, or chain them via callTool() and dependencies[]. If none fit, retry the 'create_tool' action with force: true.`
                         );
                     }
                 }
@@ -378,6 +548,16 @@ server.registerTool(
                     parsedReturnsSchema = JSON.parse(returns_schema);
                 } catch {
                     return createToolResponse("Invalid JSON returns_schema provided");
+                }
+            }
+
+            let parsedTests: CustomTool["tests"];
+            if (tests) {
+                try {
+                    parsedTests = JSON.parse(tests);
+                    if (!Array.isArray(parsedTests)) throw new Error("not an array");
+                } catch {
+                    return createToolResponse("Invalid tests JSON — expected an array of test cases");
                 }
             }
 
@@ -417,7 +597,8 @@ server.registerTool(
                 author,
                 imports,
                 returnsSchema: parsedReturnsSchema,
-                timeoutMs: timeout_ms
+                timeoutMs: timeout_ms,
+                tests: parsedTests
             };
 
             if (rate_limit_per_minute || rate_limit_per_hour) {
@@ -431,20 +612,21 @@ server.registerTool(
             await logAudit("tool_created", name, { version: 1, category, capabilities: parsedCaps.length });
             sessionLog.created.push(name);
 
-            const cacheKey = `${name}:${description}:${code}`;
-            let knowledgePrompt = await getCachedKnowledge(cacheKey);
-            if (!knowledgePrompt) {
-                knowledgePrompt = buildKnowledgePrompt();
-                await setCachedKnowledge(cacheKey, knowledgePrompt);
-            }
-
-            let response = knowledgePrompt + "\n\n---\n\n";
-            response += `Tool '${name}' created (v1).`;
+            let response = knowledgeBlock();
             if (parsedCaps.length > 0) {
+                response += `Tool '${name}' created (v1).`;
                 response += `\n\nRequested capabilities:\n${formatCapabilities(parsedCaps)}`;
-                response += `\n\nRun 'approve_tool' then 'save_tool' to activate.`;
+                response += `\n\nRun the 'approve_tool' then 'save_tool' actions to activate.`;
             } else {
-                response += ` Run 'save_tool' to activate.`;
+                const failures = await testGate(tool);
+                if (failures) {
+                    response += `Tool '${name}' created (v1) but NOT activated — tests failed:\n\n${failures}\n\nFix with the 'update_tool' action, then run 'save_tool'.`;
+                } else {
+                    await registerCustomTool(tool);
+                    await notifyToolsChanged();
+                    await logAudit("tool_activated", name, { version: 1 });
+                    response += `Tool '${name}' created and activated (v1). It is now directly callable as '${name}'.`;
+                }
             }
 
             return createToolResponse(response);
@@ -455,7 +637,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "update_tool",
     {
         description: "Fix or improve an existing tool. Read the full error before changing anything. One targeted fix beats delete and rebuild every time. Never narrow a tool's scope to make an error go away.",
@@ -473,10 +655,11 @@ server.registerTool(
             github_token: z.string().optional().describe("GitHub token to check marketplace for newer version"),
             imports: z.array(z.string()).optional().describe("NPM packages to inject into the sandbox"),
             returns_schema: z.string().optional().describe("JSON schema string for output validation"),
-            timeout_ms: z.number().optional().describe("Max execution time in milliseconds")
+            timeout_ms: z.number().optional().describe("Max execution time in milliseconds"),
+            tests: z.string().optional().describe("JSON array of test cases: [{name, input, expect?, expectError?}]")
         }),
     },
-    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, github_token, imports, returns_schema, timeout_ms }) => {
+    async ({ name, description, schema, code, capabilities, category, tags, dependencies, rate_limit_per_minute, rate_limit_per_hour, github_token, imports, returns_schema, timeout_ms, tests }) => {
         try {
             if (!await toolExists(name)) {
                 return createToolResponse(`Tool '${name}' not found.`);
@@ -490,7 +673,7 @@ server.registerTool(
                     const matches = await browseRemote(github_token, name);
                     const remote = matches.find(e => e.name === name);
                     if (remote && parseInt(remote.version, 10) > existing.version) {
-                        marketplaceNote = `\n\n💡 Marketplace has v${remote.version} of '${name}' by ${remote.author}. Consider installing it instead with install_from_remote.`;
+                        marketplaceNote = `\n\n💡 Marketplace has v${remote.version} of '${name}' by ${remote.author}. Consider installing it instead via share {action:"marketplace_install_remote"}.`;
                     }
                 } catch {
                 }
@@ -531,6 +714,16 @@ server.registerTool(
                 }
             }
 
+            let parsedTests = existing.tests;
+            if (tests) {
+                try {
+                    parsedTests = JSON.parse(tests);
+                    if (!Array.isArray(parsedTests)) throw new Error("not an array");
+                } catch {
+                    return createToolResponse("Invalid tests JSON — expected an array of test cases");
+                }
+            }
+
             const updated: CustomTool = {
                 ...existing,
                 description: description ?? existing.description,
@@ -544,7 +737,8 @@ server.registerTool(
                 dependencies: dependencies ?? existing.dependencies,
                 imports: imports ?? existing.imports,
                 returnsSchema: parsedReturnsSchema ?? existing.returnsSchema,
-                timeoutMs: timeout_ms ?? existing.timeoutMs
+                timeoutMs: timeout_ms ?? existing.timeoutMs,
+                tests: parsedTests
             };
 
             if (rate_limit_per_minute !== undefined || rate_limit_per_hour !== undefined) {
@@ -558,23 +752,18 @@ server.registerTool(
             await logAudit("tool_updated", name, { version: updated.version });
             sessionLog.updated.push(name);
 
-            const cacheKey = `${name}:${updated.description}:${updated.code}`;
-            let knowledgePrompt = await getCachedKnowledge(cacheKey);
-            if (!knowledgePrompt) {
-                knowledgePrompt = buildKnowledgePrompt();
-                await setCachedKnowledge(cacheKey, knowledgePrompt);
-            }
-            const kp = knowledgePrompt + "\n\n---\n\n";
+            const kp = knowledgeBlock();
 
             if (registeredTools.has(name)) {
-                const { approved, missing } = await checkToolApproval(updated);
+                const { approved, missing, reason } = await checkToolApproval(updated);
                 if (!approved) {
                     await unregisterCustomTool(name);
                     await notifyToolsChanged();
                     return createToolResponse(
                         kp +
                         `Tool '${name}' updated to v${updated.version} but deactivated.\n\n` +
-                        `New capabilities require approval:\n${formatCapabilities(missing)}` +
+                        (reason ? `${reason}\n\n` : "") +
+                        `Capabilities requiring approval:\n${formatCapabilities(missing)}` +
                         marketplaceNote
                     );
                 }
@@ -592,7 +781,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "mark_tool_deprecated",
     {
         description: "Mark a tool as deprecated when it cannot be fixed. Always search for or build a replacement immediately after deprecating.",
@@ -628,7 +817,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "validate_tool",
     {
         description: "Validate JavaScript syntax without creating the tool. Run this before create_tool when the code is complex.",
@@ -646,7 +835,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "save_tool",
     {
         description: "Activate a tool after creation or approval. Run this after approve_tool if capabilities were requested.",
@@ -659,12 +848,21 @@ server.registerTool(
             }
 
             const tool = await readToolData(name);
-            const { approved, missing } = await checkToolApproval(tool);
+            const { approved, missing, reason } = await checkToolApproval(tool);
 
             if (!approved) {
                 return createToolResponse(
+                    (reason ? `${reason}\n\n` : "") +
                     `Tool '${name}' requires unapproved capabilities:\n${formatCapabilities(missing)}\n\n` +
-                    `Run 'approve_tool' first.`
+                    `Run the 'approve_tool' action first.`
+                );
+            }
+
+            const failures = await testGate(tool);
+            if (failures) {
+                return createToolResponse(
+                    `Tool '${name}' NOT activated — tests failed:\n\n${failures}\n\n` +
+                    `Fix with the 'update_tool' action, then retry 'save_tool'.`
                 );
             }
 
@@ -679,7 +877,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "approve_tool",
     {
         description: "Approve capabilities for a tool before activation. Request minimum capabilities only — precise approvals are faster. net needs domains, fs needs mode and paths, child_process needs exact commands, env needs exact variable names.",
@@ -697,7 +895,7 @@ server.registerTool(
             const tool = await readToolData(name);
 
             if (tool.capabilities.length === 0) {
-                return createToolResponse(`Tool '${name}' requires no capabilities. Use 'save_tool' directly.`);
+                return createToolResponse(`Tool '${name}' requires no capabilities. Use the 'save_tool' action directly.`);
             }
 
             let toApprove: Capability[];
@@ -707,12 +905,12 @@ server.registerTool(
                 toApprove = tool.capabilities;
             }
 
-            await approveToolCapabilities(tool.name, tool.version, toApprove);
+            await approveToolCapabilities(tool, toApprove);
             await logAudit("permissions_approved", name, { capabilities: toApprove.length });
 
             return createToolResponse(
                 `Approved for '${name}' (v${tool.version}):\n${formatCapabilities(toApprove)}\n\n` +
-                `Run 'save_tool' to activate.`
+                `Run the 'save_tool' action to activate.`
             );
         } catch (error) {
             return createErrorResponse(error);
@@ -720,7 +918,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "revoke_permissions",
     {
         description: "Revoke approved capabilities and deactivate a tool. Use when a tool's capability scope needs to change.",
@@ -749,7 +947,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_permissions",
     {
         description: "List all approved capability sets. Review this when debugging why a tool cannot access network, filesystem, or environment.",
@@ -774,7 +972,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_tool",
     {
         description: "Delete a tool permanently. If the tool has failures — fix it with update_tool first. Deleting and rebuilding narrower destroys the ecosystem.",
@@ -817,7 +1015,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_tools",
     {
         description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists.",
@@ -877,7 +1075,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_tool_source",
     {
         description: "Get full source code and metadata for a tool. Run this before update_tool to understand what you are changing.",
@@ -919,7 +1117,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_tool_stats",
     {
         description: "Get execution statistics for a tool or all tools. Use to spot failure patterns before they become anomalies.",
@@ -953,7 +1151,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "export_tool",
     {
         description: "Export a tool as portable JSON including permissions. Use before marketplace_publish or to back up a tool.",
@@ -980,6 +1178,7 @@ server.registerTool(
                 if (perm) exported.permissions = perm;
             }
 
+            exported.signature = await signTool(tool);
             await logAudit("tool_exported", name);
             return createToolResponse(JSON.stringify(exported, null, 2));
         } catch (error) {
@@ -988,7 +1187,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "import_tool",
     {
         description: "Import a tool from exported JSON. Use to restore a backup or install a shared tool.",
@@ -1009,28 +1208,39 @@ server.registerTool(
                 return createToolResponse(`Tool '${name}' exists. Use overwrite=true.`);
             }
 
+            let signatureNote: string;
+            if (data.signature) {
+                if (!verifyToolSignature(data.tool, data.signature)) {
+                    return createToolResponse(
+                        `Import REFUSED: signature verification failed for '${name}'. ` +
+                        `The tool content was modified after it was exported, or the signature is forged.`
+                    );
+                }
+                signatureNote = "Signature: VALID (ed25519).";
+            } else {
+                signatureNote = "Signature: none — unsigned export, treat as untrusted.";
+            }
+
             const tool = migrateToolData(data.tool);
             tool.updatedAt = new Date().toISOString();
 
             await writeToolData(tool);
+            await logAudit("tool_imported", name);
 
-            if (data.permissions) {
-                await approveToolCapabilities(
-                    name,
-                    data.permissions.toolVersion,
-                    data.permissions.approvedCapabilities
+            if (tool.capabilities.length > 0) {
+                return createToolResponse(
+                    `Tool '${name}' imported. ${signatureNote}\n\nIt requests:\n${formatCapabilities(tool.capabilities)}\n\n` +
+                    `Imported permissions are never trusted. Run the 'approve_tool' then 'save_tool' actions to activate.`
                 );
             }
-
-            await logAudit("tool_imported", name);
-            return createToolResponse(`Tool '${name}' imported successfully.`);
+            return createToolResponse(`Tool '${name}' imported. ${signatureNote} Run the 'save_tool' action to activate.`);
         } catch (error) {
             return createErrorResponse(error);
         }
     }
 );
 
-server.registerTool(
+defineAction(
     "list_templates",
     {
         description: "List available starter templates. Run before create_tool — never write from scratch what a template already provides.",
@@ -1049,7 +1259,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_from_template",
     {
         description: "Create a tool from a template. Always prefer this over writing from scratch when a template fits.",
@@ -1101,19 +1311,20 @@ server.registerTool(
             await writeToolData(tool);
             await logAudit("tool_created", name, { template: template_id });
 
-            const cacheKey = `${name}:${tool.description}:${tool.code}`;
-            let knowledgePrompt = await getCachedKnowledge(cacheKey);
-            if (!knowledgePrompt) {
-                knowledgePrompt = buildKnowledgePrompt();
-                await setCachedKnowledge(cacheKey, knowledgePrompt);
-            }
-
-            let response = knowledgePrompt + "\n\n---\n\n";
-            response += `Tool '${name}' created from template '${template_id}'.`;
+            let response = knowledgeBlock();
             if (caps.length > 0) {
-                response += `\n\nCapabilities:\n${formatCapabilities(caps)}\n\nRun 'approve_tool' then 'save_tool'.`;
+                response += `Tool '${name}' created from template '${template_id}'.`;
+                response += `\n\nCapabilities:\n${formatCapabilities(caps)}\n\nRun the 'approve_tool' then 'save_tool' actions.`;
             } else {
-                response += ` Run 'save_tool' to activate.`;
+                const failures = await testGate(tool);
+                if (failures) {
+                    response += `Tool '${name}' created from template '${template_id}' but NOT activated — tests failed:\n\n${failures}`;
+                } else {
+                    await registerCustomTool(tool);
+                    await notifyToolsChanged();
+                    await logAudit("tool_activated", name, { version: 1 });
+                    response += `Tool '${name}' created from template '${template_id}' and activated.`;
+                }
             }
 
             return createToolResponse(response);
@@ -1123,7 +1334,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_audit_logs",
     {
         description: "Get the execution audit trail for a tool or all tools. Run when debugging unexpected behavior or tracing what changed and when.",
@@ -1153,7 +1364,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "reload_tools",
     {
         description: "Reload all approved tools from disk. Run after manual file changes or after recovering from an error state.",
@@ -1183,7 +1394,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_versions",
     {
         description: "List version history for a tool. Run before rollback_tool to find the right version.",
@@ -1207,7 +1418,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "rollback_tool",
     {
         description: "Roll back a tool to a previous version. Use when an update broke something and the fix is not obvious.",
@@ -1244,7 +1455,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "diff_versions",
     {
         description: "Compare two versions of a tool. Run before rollback to understand exactly what changed.",
@@ -1272,7 +1483,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "set_secret",
     {
         description: "Store an encrypted credential. Always use this for API keys, tokens, passwords, and connection strings. Never put credentials in tool code.",
@@ -1292,7 +1503,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_secret",
     {
         description: "Retrieve a masked view of a stored secret name. Use list_secrets to see what credentials are available before building tools that need them.",
@@ -1314,7 +1525,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_secret",
     {
         description: "Delete a stored secret. Verify no active tools depend on it before deleting.",
@@ -1334,7 +1545,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_secrets",
     {
         description: "List all stored secret names. Run this before building tools that need credentials to know what is already available.",
@@ -1354,7 +1565,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "clear_cache",
     {
         description: "Clear cached results for a tool or all tools. Run after fixing a tool that was returning wrong cached results.",
@@ -1378,7 +1589,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "cache_stats",
     {
         description: "Get cache hit rate and entry counts. Use to decide if a tool needs cache TTL adjustment.",
@@ -1394,7 +1605,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "run_tests",
     {
         description: "Run all test cases for a tool. Run after every update_tool call to confirm the fix worked. A tool with no passing tests is a tool waiting to fail silently.",
@@ -1423,7 +1634,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_alias",
     {
         description: "Create a named shortcut for a tool with preset parameters. Create aliases for any tool called repeatedly with the same base configuration.",
@@ -1456,7 +1667,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_alias",
     {
         description: "Delete a tool alias. The underlying tool is not affected.",
@@ -1476,7 +1687,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_aliases",
     {
         description: "List all tool aliases. Check this before creating an alias — it may already exist.",
@@ -1498,7 +1709,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "execute_alias",
     {
         description: "Execute a tool through a named alias with preset parameters. Use for frequently repeated calls with the same base params.",
@@ -1533,7 +1744,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "batch_execute",
     {
         description: "Execute a tool against multiple inputs in parallel. Use instead of looping callTool() manually. Set concurrency based on rate limits.",
@@ -1576,7 +1787,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_pipeline",
     {
         description: "Chain multiple tools into a reusable pipeline. Create a pipeline any time two or more tools always run in sequence for a task.",
@@ -1604,7 +1815,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "execute_pipeline",
     {
         description: "Run a pipeline with optional initial input. Output of each step is available to the next via $prev.result or $stepName.result.",
@@ -1640,7 +1851,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_pipeline",
     {
         description: "Delete a pipeline. The individual tools inside it are not affected.",
@@ -1660,7 +1871,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_pipelines",
     {
         description: "List all pipelines. Check this before building a new sequence — the pipeline may already exist.",
@@ -1682,7 +1893,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_schedule",
     {
         description: "Schedule a tool to run automatically on a cron expression. Create a schedule immediately after building any tool for a recurring task — do not wait to be asked.",
@@ -1715,7 +1926,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_schedule",
     {
         description: "Delete a schedule. The tool itself is not affected.",
@@ -1735,7 +1946,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_schedules",
     {
         description: "List all active schedules with next run times.",
@@ -1755,7 +1966,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_webhook",
     {
         description: "Expose a tool as an HTTP endpoint. Create a webhook for any tool that needs to be triggered by external systems or events.",
@@ -1783,6 +1994,7 @@ server.registerTool(
                 secret
             });
 
+            startWebhookServer(3002, callToolInternal);
             await logAudit("webhook_created", tool_name, { webhookId: webhook.id, path: webhookPath });
             return createToolResponse(`Webhook created:\n${formatWebhook(webhook)}`);
         } catch (error) {
@@ -1791,7 +2003,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_webhook",
     {
         description: "Delete a webhook endpoint. The tool itself is not affected.",
@@ -1811,7 +2023,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_webhooks",
     {
         description: "List all webhook endpoints with their paths and methods.",
@@ -1831,7 +2043,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_export",
     {
         description: "Export a tool to the local marketplace for sharing or backup.",
@@ -1856,7 +2068,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_import",
     {
         description: "Import a tool from the local marketplace.",
@@ -1888,7 +2100,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_list",
     {
         description: "List all tools in the local marketplace.",
@@ -1908,7 +2120,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_delete",
     {
         description: "Delete a tool from the local marketplace.",
@@ -1930,7 +2142,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_publish",
     {
         description: "Publish a tool to the remote GitHub marketplace. Ownership is tied to your GitHub token — only you can update or delete tools you publish. Ensure the tool uses secrets.get() for credentials and does not contain hardcoded API keys.",
@@ -1960,7 +2172,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_browse",
     {
         description: "Browse the remote GitHub marketplace. Run before create_tool — install community tools instead of rebuilding common functionality.",
@@ -1988,7 +2200,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_install_remote",
     {
         description: "Install a tool from the remote marketplace. Always prefer installing over rebuilding.",
@@ -2025,7 +2237,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "marketplace_delete_remote",
     {
         description: "Remove a tool from the remote GitHub marketplace. Only the original publisher can delete their tools.",
@@ -2052,7 +2264,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "report_tool_issue",
     {
         description: "Report a failure with a marketplace tool. Run when an installed tool is consistently failing so the community knows.",
@@ -2073,7 +2285,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "publish_tool_stats",
     {
         description: "Share real usage data for a marketplace tool. Run after a tool accumulates meaningful usage to contribute back to the community.",
@@ -2093,7 +2305,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_resource",
     {
         description: "Create an MCP resource — a named, versioned piece of content accessible to any agent in context.",
@@ -2122,7 +2334,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_resource",
     {
         description: "Delete an MCP resource.",
@@ -2142,7 +2354,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_resources",
     {
         description: "List all MCP resources available in context.",
@@ -2162,7 +2374,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_resource",
     {
         description: "Get a specific MCP resource by URI including its full content.",
@@ -2183,7 +2395,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_prompt",
     {
         description: "Create a reusable MCP prompt template with named arguments and placeholders.",
@@ -2212,7 +2424,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_prompt",
     {
         description: "Delete an MCP prompt template.",
@@ -2232,7 +2444,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_prompts",
     {
         description: "List all MCP prompt templates.",
@@ -2252,7 +2464,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "render_prompt",
     {
         description: "Render a prompt template with argument values. Use before passing a prompt to an LLM call.",
@@ -2283,7 +2495,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "search_tools",
     {
         description: "Search tools by natural language. ALWAYS run this before create_tool. If confidence > 40% — use or compose the existing tool instead of building.",
@@ -2322,7 +2534,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_tool_graph",
     {
         description: "Get the full dependency graph of all tools. Run before building to understand composition opportunities. Prefer extending an existing graph over adding isolated tools.",
@@ -2405,7 +2617,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "create_persona",
     {
         description: "Save a named agent configuration grouping related tools with an optional system prompt. Create a persona after completing any multi-tool task so future agents can activate this context instantly.",
@@ -2426,7 +2638,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_personas",
     {
         description: "List all saved personas. ALWAYS run this at task start — activate a matching persona before reaching for individual tools.",
@@ -2443,7 +2655,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "activate_persona",
     {
         description: "Load a persona's tool list and system prompt. Activating a persona scopes your work to the right tool set for the context.",
@@ -2471,7 +2683,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_persona",
     {
         description: "Delete a saved agent persona. The tools inside it are not affected.",
@@ -2490,7 +2702,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "update_persona",
     {
         description: "Update a persona's tool list, description, or system prompt. Run after adding or removing tools from a task context.",
@@ -2516,7 +2728,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "knowledge_cache_stats",
     {
         description: "Get statistics about the knowledge prompt cache.",
@@ -2532,7 +2744,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "clear_knowledge_cache",
     {
         description: "Clear the knowledge cache to force fresh principles on next tool creation.",
@@ -2548,7 +2760,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_anomalies",
     {
         description: "List tools currently performing outside their baseline. Review anomalies before starting work — a degraded tool will slow down your task.",
@@ -2578,7 +2790,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "run_anomaly_check",
     {
         description: "Manually trigger anomaly detection across all tools. Run when tools are behaving unexpectedly.",
@@ -2598,7 +2810,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "clear_anomaly",
     {
         description: "Clear the anomaly flag after fixing a tool. Always run this after a successful update_tool fix.",
@@ -2619,7 +2831,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "reset_anomaly_baseline",
     {
         description: "Reset the performance baseline after an intentional change. Run after any update that deliberately changes a tool's speed or behavior.",
@@ -2640,7 +2852,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_mutation_proposals",
     {
         description: "List tools that need proactive rewriting based on failure patterns. Review proposals before starting a session — fix degraded tools before building new ones.",
@@ -2662,7 +2874,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_mutation_context",
     {
         description: "Get full diagnostic context for rewriting a failing tool — code, stats, errors, anomaly details. Always run this before update_tool on a failing tool.",
@@ -2696,7 +2908,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "set_memory",
     {
         description: "Persist a key-value pair across sessions. Use for task context, user preferences, and state that must survive server restarts. Use namespaces to group related data.",
@@ -2718,7 +2930,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_memory",
     {
         description: "Retrieve a persisted value by key and namespace. Check memory before asking the user for context they may have already provided.",
@@ -2740,7 +2952,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "delete_memory",
     {
         description: "Delete a specific key from cross-session memory.",
@@ -2762,7 +2974,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_memory",
     {
         description: "List all memory entries optionally filtered by namespace. Run at task start to load relevant context automatically.",
@@ -2787,7 +2999,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "clear_memory",
     {
         description: "Clear all cross-session memory entries, or all entries within a specific namespace.",
@@ -2806,7 +3018,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "match_intent",
     {
         description: "Deep intent matching with confidence scores and composition suggestions. Run when search_tools returns low confidence to find composition paths.",
@@ -2828,7 +3040,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "add_marketplace_peer",
     {
         description: "Add a new Architect instance URL as a remote marketplace peer to fetch tools from.",
@@ -2847,7 +3059,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "list_marketplace_peers",
     {
         description: "List all registered marketplace peers.",
@@ -2865,7 +3077,7 @@ server.registerTool(
     }
 );
 
-server.registerTool(
+defineAction(
     "get_system_status",
     {
         description: "Get a complete snapshot of the current system state: active tools, anomalies, schedules, webhooks, pipelines, memory, secrets, and cache stats. Call this at the start of any session to orient yourself before taking any action.",
@@ -2911,6 +3123,14 @@ server.registerTool(
             if (anomalies.length > 0) {
                 for (const a of anomalies) {
                     lines.push(`    ⚠️  ${a.toolName}: ${a.reasons.join(", ")}`);
+                }
+            }
+
+            if (quarantinedTools.length > 0) {
+                lines.push(``);
+                lines.push(`QUARANTINED (not loaded)`);
+                for (const q of quarantinedTools) {
+                    lines.push(`  ✗ ${q.name}: ${q.reason}`);
                 }
             }
 
@@ -2976,14 +3196,11 @@ server.registerTool(
 );
 
 for (const def of BROWSER_TOOL_DEFINITIONS) {
-    const zodSchema = jsonSchemaToZod(def.inputSchema);
-    server.registerTool(
-        def.name,
-        {
-            description: def.description,
-            inputSchema: zodSchema,
-        },
-        async (params: Record<string, unknown>) => {
+    actionRegistry.set(def.name, {
+        gateway: "browser",
+        description: def.description,
+        schema: jsonSchemaToZod(def.inputSchema),
+        handler: async (params: Record<string, unknown>) => {
             try {
                 const result = await def.handler(params as Record<string, any>);
                 return { content: [{ type: "text" as const, text: result }] };
@@ -2992,23 +3209,30 @@ for (const def of BROWSER_TOOL_DEFINITIONS) {
                 return { content: [{ type: "text" as const, text: `Browser tool error: ${msg}` }] };
             }
         }
-    );
+    });
 }
 
+registerGateways();
+
+const quarantinedTools: Array<{ name: string; reason: string }> = [];
+
 async function loadExistingTools(): Promise<void> {
+    quarantinedTools.length = 0;
     const files = await getAllToolFiles();
     for (const file of files) {
         const name = file.replace(".json", "");
         try {
             const tool = await readToolData(name);
-            const { approved } = await checkToolApproval(tool);
+            const { approved, reason } = await checkToolApproval(tool);
             if (!approved) {
+                quarantinedTools.push({ name, reason: reason ?? "Capabilities not approved" });
                 console.error(`Skipping unapproved: ${name}`);
                 continue;
             }
             await registerCustomTool(tool);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            quarantinedTools.push({ name, reason: msg });
             if (msg.includes("JSON") || msg.includes("Unexpected token") || msg.includes("Unexpected end")) {
                 console.error(`[CORRUPT] Tool '${name}' has invalid JSON: ${msg}`);
             } else if (msg.includes("migration") || msg.includes("schema")) {
@@ -3042,6 +3266,7 @@ async function gracefulShutdown(): Promise<void> {
     await flushCache();
     stopWebhookServer();
     stopDashboard();
+    disposeSandboxPool();
     process.exit(0);
 }
 
@@ -3063,15 +3288,11 @@ async function main(): Promise<void> {
 
     startCacheFlushInterval();
     startScheduler(callToolInternal);
-    startDeprecationChecker(
-        async () => {
-            const files = await getAllToolFiles();
-            return Promise.all(files.map(f => readToolData(f.replace(".json", ""))));
-        },
-        writeToolData
-    );
+    startDeprecationChecker(async () => readAllTools(), writeToolData);
     startAnomalyChecker();
-    startWebhookServer(3002, callToolInternal);
+    if ((await listAllWebhooks()).length > 0) {
+        startWebhookServer(3002, callToolInternal);
+    }
     startDashboard(
         3001,
         () => registeredTools,
@@ -3092,8 +3313,7 @@ async function main(): Promise<void> {
         async (name: string, params: Record<string, unknown>) => {
             const tool = registeredTools.get(name);
             if (!tool) throw new Error(`Tool '${name}' not found`);
-            const permission = await getToolPermissions(name);
-            const approvedCaps = permission?.approvedCapabilities ?? [];
+            const approvedCaps = await getApprovedCapabilities(tool);
             const sandbox = new ToolSandbox({ timeoutMs: 30000, capabilities: approvedCaps, toolCaller: callToolInternal });
             try {
                 const r = await sandbox.execute(tool.code, params);

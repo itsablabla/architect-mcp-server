@@ -1,4 +1,5 @@
-import { Worker } from "worker_threads";
+import { fork, ChildProcess } from "child_process";
+import { randomUUID } from "crypto";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as vm from "vm";
@@ -221,11 +222,217 @@ function createEnvApi(cap: EnvCapability) {
     };
 }
 
+type Broker = (capType: string, method: string, args: any[]) => Promise<any>;
+
+interface RunOptions {
+    code: string;
+    params: Record<string, unknown>;
+    capabilityTypes: string[];
+    imports: string[];
+    timeoutMs: number;
+    broker: Broker;
+}
+
+interface ActiveExecution {
+    execId: string;
+    broker: Broker;
+    finish: (result: SandboxResult, recycle: boolean) => void;
+}
+
+class ChildHandle {
+    proc: ChildProcess;
+    busy = false;
+    execCount = 0;
+    dead = false;
+    active: ActiveExecution | null = null;
+    readonly ready: Promise<void>;
+
+    constructor(scriptPath: string, memoryLimitMB: number, private onExit: (h: ChildHandle) => void) {
+        this.proc = fork(scriptPath, [], {
+            execArgv: [`--max-old-space-size=${memoryLimitMB}`],
+            serialization: "advanced",
+            stdio: ["ignore", "ignore", "inherit", "ipc"],
+            env: {}
+        });
+
+        this.ready = new Promise<void>((resolve) => {
+            const onReady = (msg: any) => {
+                if (msg && msg.type === "ready") {
+                    this.proc.off("message", onReady);
+                    resolve();
+                }
+            };
+            this.proc.on("message", onReady);
+        });
+
+        this.proc.on("message", (msg: any) => this.handleMessage(msg));
+        this.proc.on("exit", () => {
+            this.dead = true;
+            if (this.active) {
+                this.active.finish({ success: false, error: "Sandbox process exited unexpectedly", logs: [] }, true);
+            }
+            this.onExit(this);
+        });
+    }
+
+    private handleMessage(msg: any): void {
+        if (!this.active || !msg || msg.execId !== this.active.execId) return;
+
+        if (msg.type === "capability_request") {
+            const { id, capType, method, args } = msg;
+            this.active.broker(capType, method, args)
+                .then((result) => this.safeSend({ type: "capability_response", execId: msg.execId, id, result }))
+                .catch((err) => this.safeSend({ type: "capability_response", execId: msg.execId, id, error: err instanceof Error ? err.message : String(err) }));
+        } else if (msg.type === "result") {
+            this.active.finish({ success: msg.success, result: msg.result, error: msg.error, logs: msg.logs || [] }, false);
+        }
+    }
+
+    private safeSend(payload: any): void {
+        if (!this.dead && this.proc.connected) {
+            try { this.proc.send(payload); } catch { /* process gone */ }
+        }
+    }
+
+    send(payload: any): void {
+        this.safeSend(payload);
+    }
+
+    kill(): void {
+        this.dead = true;
+        try { this.proc.kill("SIGKILL"); } catch { /* already gone */ }
+    }
+}
+
+class SandboxPool {
+    private idle: ChildHandle[] = [];
+    private all = new Set<ChildHandle>();
+    private waiters: Array<(h: ChildHandle) => void> = [];
+    private readonly scriptPath = path.resolve(__dirname, "sandbox-process.js");
+
+    constructor(
+        private maxSize = Number(process.env.ARCHITECT_SANDBOX_POOL ?? 4),
+        private maxExecutions = Number(process.env.ARCHITECT_SANDBOX_MAX_EXEC ?? 50),
+        private memoryLimitMB = Number(process.env.ARCHITECT_SANDBOX_MEMORY_MB ?? 128)
+    ) { }
+
+    private spawn(): ChildHandle {
+        const handle = new ChildHandle(this.scriptPath, this.memoryLimitMB, (h) => this.onChildExit(h));
+        this.all.add(handle);
+        return handle;
+    }
+
+    private onChildExit(handle: ChildHandle): void {
+        this.all.delete(handle);
+        this.idle = this.idle.filter(h => h !== handle);
+        this.pump();
+    }
+
+    private pump(): void {
+        while (this.waiters.length > 0) {
+            const handle = this.idle.pop() ?? (this.all.size < this.maxSize ? this.spawn() : null);
+            if (!handle) break;
+            const waiter = this.waiters.shift()!;
+            waiter(handle);
+        }
+    }
+
+    private acquire(): Promise<ChildHandle> {
+        const handle = this.idle.pop() ?? (this.all.size < this.maxSize ? this.spawn() : null);
+        if (handle) return Promise.resolve(handle);
+        return new Promise<ChildHandle>((resolve) => this.waiters.push(resolve));
+    }
+
+    private destroy(handle: ChildHandle): void {
+        this.all.delete(handle);
+        handle.kill();
+        this.pump();
+    }
+
+    private releaseIdle(handle: ChildHandle): void {
+        if (this.waiters.length > 0) {
+            this.waiters.shift()!(handle);
+        } else {
+            this.idle.push(handle);
+        }
+    }
+
+    async run(opts: RunOptions): Promise<SandboxResult> {
+        const handle = await this.acquire();
+        await handle.ready;
+
+        if (handle.dead) {
+            return this.run(opts);
+        }
+
+        const execId = randomUUID();
+        handle.busy = true;
+        handle.execCount++;
+
+        return new Promise<SandboxResult>((resolve) => {
+            let settled = false;
+
+            const timer = setTimeout(() => finish({ success: false, error: `Execution timed out after ${opts.timeoutMs}ms`, logs: [] }, true), opts.timeoutMs);
+
+            const finish = (result: SandboxResult, recycle: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                handle.active = null;
+                handle.busy = false;
+                if (recycle || handle.dead || handle.execCount >= this.maxExecutions) {
+                    this.destroy(handle);
+                } else {
+                    this.releaseIdle(handle);
+                }
+                resolve(result);
+            };
+
+            handle.active = { execId, broker: opts.broker, finish };
+            handle.send({
+                type: "execute",
+                execId,
+                code: opts.code,
+                params: opts.params,
+                capabilityTypes: opts.capabilityTypes,
+                imports: opts.imports
+            });
+        });
+    }
+
+    prewarm(count: number): void {
+        for (let i = 0; i < count && this.all.size < this.maxSize; i++) {
+            this.releaseIdle(this.spawn());
+        }
+    }
+
+    dispose(): void {
+        this.waiters = [];
+        for (const handle of this.all) handle.kill();
+        this.all.clear();
+        this.idle = [];
+    }
+}
+
+let _pool: SandboxPool | null = null;
+
+function getPool(): SandboxPool {
+    if (!_pool) {
+        _pool = new SandboxPool();
+        _pool.prewarm(2);
+    }
+    return _pool;
+}
+
+export function disposeSandboxPool(): void {
+    if (_pool) {
+        _pool.dispose();
+        _pool = null;
+    }
+}
+
 export class ToolSandbox {
     private options: SandboxOptions & { memoryLimitMB: number; timeoutMs: number };
-    private logs: string[] = [];
-    private originalCode: string = "";
-    private worker: Worker | null = null;
     private capabilityHandlers: Map<string, any> = new Map();
 
     constructor(options: SandboxOptions) {
@@ -255,15 +462,14 @@ export class ToolSandbox {
         }
     }
 
-    private async handleCapabilityRequest(msg: any): Promise<any> {
-        const { capType, method, args } = msg;
-
+    private async handleCapabilityRequest(capType: string, method: string, args: any[]): Promise<any> {
         if (capType === "secrets") {
             const secretsApi = createSecretsApi();
             return secretsApi.get(args[0]);
         }
 
-        if (capType === "callTool" && this.options.toolCaller) {
+        if (capType === "callTool") {
+            if (!this.options.toolCaller) throw new Error("Tool chaining not available in this context");
             return this.options.toolCaller(args[0], args[1]);
         }
 
@@ -291,108 +497,17 @@ export class ToolSandbox {
     }
 
     async execute(code: string, params: Record<string, unknown>): Promise<SandboxResult> {
-        this.logs = [];
-        this.originalCode = code;
-
-        const capabilityTypes = this.options.capabilities.map(c => c.type);
-        const workerPath = path.resolve(__dirname, "tool-worker.js");
-
-        return new Promise<SandboxResult>((resolve) => {
-            let settled = false;
-
-            const worker = new Worker(workerPath, {
-                workerData: { code, params, capabilityTypes, imports: this.options.imports ?? [] },
-                resourceLimits: {
-                    maxOldGenerationSizeMb: this.options.memoryLimitMB,
-                    maxYoungGenerationSizeMb: this.options.memoryLimitMB / 4
-                }
-            });
-
-            this.worker = worker;
-
-            const timeoutId = setTimeout(() => {
-                if (!settled) {
-                    settled = true;
-                    worker.terminate();
-                    resolve({
-                        success: false,
-                        error: `Execution timed out after ${this.options.timeoutMs}ms`,
-                        logs: this.logs
-                    });
-                }
-            }, this.options.timeoutMs);
-
-            worker.on("message", async (msg: any) => {
-                if (msg.type === "capability_request") {
-                    try {
-                        const result = await this.handleCapabilityRequest(msg);
-                        worker.postMessage({
-                            type: "capability_response",
-                            id: msg.id,
-                            result
-                        });
-                    } catch (err) {
-                        worker.postMessage({
-                            type: "capability_response",
-                            id: msg.id,
-                            error: err instanceof Error ? err.message : String(err)
-                        });
-                    }
-                } else if (msg.type === "result") {
-                    if (!settled) {
-                        settled = true;
-                        clearTimeout(timeoutId);
-                        this.logs = msg.logs || [];
-                        if (msg.success) {
-                            resolve({
-                                success: true,
-                                result: msg.result,
-                                logs: this.logs
-                            });
-                        } else {
-                            resolve({
-                                success: false,
-                                error: msg.error,
-                                logs: this.logs
-                            });
-                        }
-                        worker.terminate();
-                    }
-                }
-            });
-
-            worker.on("error", (err: Error) => {
-                if (!settled) {
-                    settled = true;
-                    clearTimeout(timeoutId);
-                    resolve({
-                        success: false,
-                        error: err.message,
-                        logs: this.logs
-                    });
-                }
-            });
-
-            worker.on("exit", (exitCode) => {
-                if (!settled) {
-                    settled = true;
-                    clearTimeout(timeoutId);
-                    resolve({
-                        success: false,
-                        error: `Worker exited unexpectedly with code ${exitCode}`,
-                        logs: this.logs
-                    });
-                }
-            });
+        return getPool().run({
+            code,
+            params,
+            capabilityTypes: this.options.capabilities.map(c => c.type),
+            imports: this.options.imports ?? [],
+            timeoutMs: this.options.timeoutMs,
+            broker: (capType, method, args) => this.handleCapabilityRequest(capType, method, args)
         });
     }
 
     dispose(): void {
-        this.logs = [];
-        if (this.worker) {
-            this.worker.terminate();
-            this.worker = null;
-        }
     }
 }
 
@@ -402,11 +517,7 @@ export async function executeInSandbox(
     capabilities: Capability[]
 ): Promise<SandboxResult> {
     const sandbox = new ToolSandbox({ capabilities });
-    try {
-        return await sandbox.execute(code, params);
-    } finally {
-        sandbox.dispose();
-    }
+    return sandbox.execute(code, params);
 }
 
 export interface ValidationResult {

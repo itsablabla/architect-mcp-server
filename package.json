@@ -2,14 +2,32 @@
   "name": "architect-mcp-server",
   "version": "1.0.0",
   "description": "Powerful, self-extending MCP server for dynamic AI tool orchestration with sandboxed execution, capability-based security, and a built-in dashboard.",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "bin": {
+    "architect-mcp": "bin/architect-mcp.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "dashboard",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
+    "prepublishOnly": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "tools",
+    "sandbox"
+  ],
   "author": "",
   "license": "ISC",
   "type": "module",

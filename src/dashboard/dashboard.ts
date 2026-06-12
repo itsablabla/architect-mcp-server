@@ -40,6 +40,16 @@ export function startDashboard(
     if (dashboardServer) return;
 
     const app = new Hono();
+    const startedAt = Date.now();
+
+    app.get("/health", (c) => {
+        return c.json({
+            status: "ok",
+            uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            activeTools: getTools().size,
+            pid: process.pid
+        });
+    });
 
     app.get("/api/tools", async (c) => {
         try {
@@ -238,7 +248,7 @@ export function startDashboard(
                 return c.json({ error: `Tool '${name}' not found` }, 404);
             }
 
-            await approveToolCapabilities(tool.name, tool.version, tool.capabilities);
+            await approveToolCapabilities(tool, tool.capabilities);
             await reloadTools();
 
             return c.json({ success: true });

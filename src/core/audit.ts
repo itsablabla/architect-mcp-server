@@ -48,6 +48,9 @@ export interface AuditEntry {
     duration?: number;
 }
 
+const AUDIT_MAX_ROWS = Number(process.env.ARCHITECT_AUDIT_MAX_ROWS ?? 10000);
+let auditWriteCount = 0;
+
 export async function logAudit(
     action: AuditAction,
     toolName: string,
@@ -65,6 +68,12 @@ export async function logAudit(
         details ? JSON.stringify(details) : null,
         duration ?? null
     );
+
+    if (++auditWriteCount % 500 === 0) {
+        db.prepare(
+            "DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?"
+        ).run(AUDIT_MAX_ROWS);
+    }
 }
 
 export async function getAuditLogs(

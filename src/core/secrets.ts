@@ -5,7 +5,8 @@ import { fileURLToPath } from "url";
 import { getDb } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const KEY_FILE = path.resolve(__dirname, "..", ".secrets.key");
+const KEY_FILE = path.resolve(__dirname, "..", "..", "data", ".secrets.key");
+const LEGACY_KEY_FILE = path.resolve(__dirname, "..", ".secrets.key");
 const ALGORITHM = "aes-256-gcm";
 
 let cachedKey: Buffer | null = null;
@@ -15,9 +16,20 @@ async function getOrCreateKey(): Promise<Buffer> {
         return cachedKey;
     }
 
+    await fs.mkdir(path.dirname(KEY_FILE), { recursive: true });
+
     try {
         const keyHex = await fs.readFile(KEY_FILE, "utf-8");
         cachedKey = Buffer.from(keyHex.trim(), "hex");
+        return cachedKey;
+    } catch {
+    }
+
+    try {
+        const legacyHex = await fs.readFile(LEGACY_KEY_FILE, "utf-8");
+        cachedKey = Buffer.from(legacyHex.trim(), "hex");
+        await fs.writeFile(KEY_FILE, legacyHex.trim(), { mode: 0o600 });
+        await fs.unlink(LEGACY_KEY_FILE).catch(() => { });
         return cachedKey;
     } catch {
     }
@@ -96,4 +108,26 @@ export function createSecretsApi(): { get: (name: string) => Promise<string | nu
     return {
         get: getSecret
     };
+}
+
+export async function redactSecrets(text: string): Promise<string> {
+    if (!text) return text;
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM secrets").all() as any[];
+    if (rows.length === 0) return text;
+
+    const key = await getOrCreateKey();
+    let out = text;
+    for (const row of rows) {
+        let value: string;
+        try {
+            value = decrypt(row.encrypted_value, row.iv, key);
+        } catch {
+            continue;
+        }
+        if (value && value.length >= 4 && out.includes(value)) {
+            out = out.split(value).join(`[REDACTED:${row.name}]`);
+        }
+    }
+    return out;
 }

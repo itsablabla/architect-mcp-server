@@ -93,7 +93,8 @@ function initializeSchema(db: Database.Database): void {
             tool_name TEXT PRIMARY KEY,
             tool_version INTEGER NOT NULL,
             approved_capabilities TEXT NOT NULL,
-            approved_at TEXT NOT NULL
+            approved_at TEXT NOT NULL,
+            code_hash TEXT
         );
 
         CREATE TABLE IF NOT EXISTS secrets (
@@ -251,6 +252,38 @@ function initializeSchema(db: Database.Database): void {
             added_at TEXT NOT NULL
         );
     `);
+
+    ensureColumns(db, "tools", {
+        capabilities: "TEXT NOT NULL DEFAULT '[]'",
+        category: "TEXT DEFAULT 'other'",
+        tags: "TEXT DEFAULT '[]'",
+        dependencies: "TEXT DEFAULT '[]'",
+        version: "INTEGER DEFAULT 1",
+        author: "TEXT",
+        deprecated: "INTEGER DEFAULT 0",
+        failing_since: "TEXT",
+        rate_limit: "TEXT",
+        cache_config: "TEXT",
+        retry_config: "TEXT",
+        tests: "TEXT",
+        imports: "TEXT DEFAULT '[]'",
+        returns_schema: "TEXT",
+        timeout_ms: "INTEGER"
+    });
+    ensureColumns(db, "permissions", {
+        code_hash: "TEXT"
+    });
+}
+
+function ensureColumns(db: Database.Database, table: string, columns: Record<string, string>): void {
+    const existing = new Set(
+        (db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => c.name)
+    );
+    for (const [name, ddl] of Object.entries(columns)) {
+        if (!existing.has(name)) {
+            db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+        }
+    }
 }
 
 export function dbExists(): boolean {

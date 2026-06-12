@@ -137,6 +137,7 @@ export interface ToolPermission {
     toolVersion: number;
     approvedCapabilities: Capability[];
     approvedAt: string;
+    codeHash?: string;
 }
 
 export interface PermissionsStore {
@@ -166,11 +167,18 @@ export interface ToolTemplate {
     tags: string[];
 }
 
+export interface ToolSignature {
+    algorithm: string;
+    publicKey: string;
+    value: string;
+}
+
 export interface ExportedTool {
     formatVersion: number;
     exportedAt: string;
     tool: CustomTool;
     permissions?: ToolPermission;
+    signature?: ToolSignature;
 }
 
 export interface ExportedToolBundle {
@@ -480,7 +488,16 @@ export const RESERVED_TOOL_NAMES = [
     "list_memory",
     "clear_memory",
     "create_schedule",
-    "delete_schedule"
+    "delete_schedule",
+    "tool",
+    "find",
+    "run",
+    "automate",
+    "store",
+    "share",
+    "admin",
+    "browser",
+    "help"
 ] as const;
 
 export type ReservedToolName = typeof RESERVED_TOOL_NAMES[number];
