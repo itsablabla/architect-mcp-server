@@ -2,8 +2,71 @@ function escHtml(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+const TOKEN_KEY = "architect_dashboard_secret";
+
 const app = {
     currentSection: "overview",
+
+    getSecret() {
+        return sessionStorage.getItem(TOKEN_KEY) || "";
+    },
+
+    setSecret(secret) {
+        if (secret) sessionStorage.setItem(TOKEN_KEY, secret);
+        else sessionStorage.removeItem(TOKEN_KEY);
+    },
+
+    authHeaders(extra = {}) {
+        const headers = { ...extra };
+        const secret = this.getSecret();
+        if (secret) headers.Authorization = `Bearer ${secret}`;
+        return headers;
+    },
+
+    async ensureSecret() {
+        if (this.getSecret()) return true;
+        const entered = window.prompt("Enter DASHBOARD_SECRET to unlock the dashboard:");
+        if (!entered) return false;
+        this.setSecret(entered.trim());
+        return true;
+    },
+
+    async apiFetch(path, options = {}) {
+        const opts = { ...options };
+        const baseHeaders = opts.headers || {};
+        opts.headers = this.authHeaders(baseHeaders);
+
+        let res = await fetch(path, opts);
+        if (res.status === 401) {
+            this.setSecret("");
+            const ok = await this.ensureSecret();
+            if (!ok) {
+                const err = new Error("Unauthorized");
+                err.status = 401;
+                throw err;
+            }
+            opts.headers = this.authHeaders(baseHeaders);
+            res = await fetch(path, opts);
+        }
+        if (!res.ok) {
+            let detail = res.statusText;
+            try {
+                const body = await res.json();
+                if (body?.error) detail = body.error;
+            } catch {}
+            const err = new Error(detail || `HTTP ${res.status}`);
+            err.status = res.status;
+            throw err;
+        }
+        if (res.status === 204) return null;
+        const text = await res.text();
+        if (!text) return null;
+        try {
+            return JSON.parse(text);
+        } catch {
+            return text;
+        }
+    },
 
     async init() {
         this.bindNavigation();
@@ -50,13 +113,21 @@ const app = {
                 case "prompts": await this.renderPrompts(content); break;
             }
         } catch (err) {
-            content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#10060;</div><div class="empty-state-text">Failed to load data</div></div>';
+            const msg = err?.status === 401
+                ? "Unauthorized — click Unlock and enter DASHBOARD_SECRET"
+                : (err?.message || "Failed to load data");
+            content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">&#10060;</div><div class="empty-state-text">${escHtml(msg)}</div><div style="margin-top:12px"><button class="btn btn-primary" onclick="app.unlock()">Unlock</button></div></div>`;
         }
     },
 
+    async unlock() {
+        this.setSecret("");
+        const ok = await this.ensureSecret();
+        if (ok) await this.refresh();
+    },
+
     async fetchApi(endpoint) {
-        const res = await fetch(`/api/${endpoint}`);
-        return res.json();
+        return this.apiFetch(`/api/${endpoint}`);
     },
 
     async renderOverview(el) {
@@ -257,7 +328,7 @@ const app = {
     },
 
     async clearCache() {
-        await fetch("/api/cache", { method: "DELETE" });
+        await this.apiFetch("/api/cache", { method: "DELETE" });
         await this.renderCache(document.getElementById("main-content"));
     },
 
@@ -345,7 +416,7 @@ const app = {
     async approveTool(name) {
         if (!confirm(`Approve capabilities for tool '${name}'?`)) return;
         try {
-            await fetch(`/api/tools/${encodeURIComponent(name)}/approve`, { method: "POST" });
+            await this.apiFetch(`/api/tools/${encodeURIComponent(name)}/approve`, { method: "POST" });
             app.refresh();
         } catch (e) {
             alert("Approval failed: " + e.message);
@@ -384,12 +455,11 @@ const app = {
         respEl.textContent = "Executing...";
 
         try {
-            const res = await fetch(`/api/tools/${encodeURIComponent(this.currentTool)}/run`, {
+            const data = await this.apiFetch(`/api/tools/${encodeURIComponent(this.currentTool)}/run`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ params })
             });
-            const data = await res.json();
             if (data.success) {
                 respEl.textContent = "Success (" + data.durationMs + "ms):\n" + JSON.stringify(data.result, null, 2);
                 respEl.style.color = "var(--success)";
@@ -439,12 +509,11 @@ const app = {
         const code = this.editor.getValue();
 
         try {
-            const res = await fetch(`/api/tools/${encodeURIComponent(this.currentTool)}/code`, {
+            const data = await this.apiFetch(`/api/tools/${encodeURIComponent(this.currentTool)}/code`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code })
             });
-            const data = await res.json();
             if (data.success) {
                 this.closeEditModal();
                 app.refresh();
