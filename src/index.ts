@@ -3376,7 +3376,13 @@ async function main(): Promise<void> {
     const enableStdio = process.env.ARCHITECT_MCP_STDIO === "1" || Boolean(process.stdin.isTTY);
 
     if (enableHttp) {
-        const authSecret = process.env.MCP_HTTP_SECRET || process.env.DASHBOARD_SECRET;
+        const authSecret = (process.env.MCP_HTTP_SECRET || process.env.DASHBOARD_SECRET || "").trim();
+        if (!authSecret) {
+            throw new Error(
+                "ARCHITECT_MCP_HTTP is enabled but neither MCP_HTTP_SECRET nor DASHBOARD_SECRET is set. " +
+                "Refusing to expose /mcp without authentication. Set one of those secrets, or set ARCHITECT_MCP_HTTP=0."
+            );
+        }
         startMcpHttpServer({
             port: httpPort,
             authSecret,

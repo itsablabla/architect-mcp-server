@@ -37,6 +37,9 @@ function checkAuth(req: Request, secret?: string): boolean {
 
 export function startMcpHttpServer(opts: McpHttpOptions): void {
     if (httpServer) return;
+    if (!opts.authSecret || !opts.authSecret.trim()) {
+        throw new Error("startMcpHttpServer requires a non-empty authSecret");
+    }
 
     const app = new Hono();
 
