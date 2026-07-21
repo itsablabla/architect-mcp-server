@@ -107,6 +107,7 @@ const app = {
                 case "pipelines": await this.renderPipelines(content); break;
                 case "cache": await this.renderCache(content); break;
                 case "secrets": await this.renderSecrets(content); break;
+                case "memory": await this.renderMemory(content); break;
                 case "aliases": await this.renderAliases(content); break;
                 case "marketplace": await this.renderMarketplace(content); break;
                 case "resources": await this.renderResources(content); break;
@@ -344,6 +345,17 @@ const app = {
             '</tbody></table></div></div></div>';
     },
 
+    async renderMemory(el) {
+        const rows = await this.fetchApi("memory");
+        if (!rows || rows.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#129504;</div><div class="empty-state-text">No memory entries</div><div class="empty-state-text" style="opacity:.7;margin-top:8px">Agents store KV memory via store gateway (set_memory).</div></div>';
+            return;
+        }
+        el.innerHTML = '<div class="card"><div class="card-header"><h3>Key-Value Memory</h3></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>Namespace</th><th>Key</th><th>Value</th></tr></thead><tbody>' +
+            rows.map(r => `<tr><td>${escHtml(r.namespace || r.ns || "")}</td><td>${escHtml(r.key)}</td><td><code>${escHtml(typeof r.value === "string" ? r.value : JSON.stringify(r.value))}</code></td></tr>`).join("") +
+            '</tbody></table></div></div></div>';
+    },
+
     async renderAliases(el) {
         const aliases = await this.fetchApi("aliases");
         if (aliases.length === 0) {
@@ -359,7 +371,14 @@ const app = {
     async renderMarketplace(el) {
         const entries = await this.fetchApi("marketplace");
         if (entries.length === 0) {
-            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#127978;</div><div class="empty-state-text">Marketplace is empty</div></div>';
+            el.innerHTML = `<div class="empty-state">
+                <div class="empty-state-icon">&#127978;</div>
+                <div class="empty-state-text">Marketplace is empty</div>
+                <div class="empty-state-text" style="opacity:.75;margin-top:10px;max-width:420px;margin-left:auto;margin-right:auto;line-height:1.45">
+                  Local exports and the public GitHub registry both have no tools yet.
+                  Create a tool via MCP, then <code>marketplace_export</code>, or set secret <code>GITHUB_TOKEN</code> and <code>marketplace_publish</code> / <code>marketplace_browse</code>.
+                </div>
+              </div>`;
             return;
         }
 

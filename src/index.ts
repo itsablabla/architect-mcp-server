@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { startMcpHttpServer, stopMcpHttpServer } from "./mcp/http.js";
 import { z } from "zod";
 import { getDb } from "./core/db.js";
 import {
@@ -268,7 +269,7 @@ function gatewayHelp(gateway: string, actions: string[], target: string | null):
         `\n\nCall {action:"help", args:{action:"<name>"}} for an action's args schema.`;
 }
 
-function registerGateways(): void {
+function registerGateways(target: McpServer = server): void {
     const byGateway = new Map<string, string[]>();
     for (const [name, entry] of actionRegistry) {
         const list = byGateway.get(entry.gateway) ?? [];
@@ -276,7 +277,7 @@ function registerGateways(): void {
         byGateway.set(entry.gateway, list);
     }
     for (const [gateway, actions] of byGateway) {
-        server.registerTool(
+        target.registerTool(
             gateway,
             {
                 description: `${GATEWAY_DESCRIPTIONS[gateway] ?? ""} Actions: ${actions.join(", ")}. Use {action:"help"} or {action:"help", args:{action:"<name>"}} for parameter schemas.`,
@@ -359,68 +360,63 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
     }
 }
 
-async function registerCustomTool(tool: CustomTool): Promise<void> {
-    const zodSchema = jsonSchemaToZod(tool.schema);
-    const approvedCaps = await getApprovedCapabilities(tool);
+const httpSessionServers = new Set<McpServer>();
 
-    server.registerTool(
-        tool.name,
-        {
-            description: tool.description,
-            inputSchema: zodSchema,
-        },
-        async (params: Record<string, unknown>) => {
+function buildCustomToolHandler(tool: CustomTool, _approvedCaps?: Awaited<ReturnType<typeof getApprovedCapabilities>>) {
+    return async (params: Record<string, unknown>) => {
             const startTime = Date.now();
+            const liveTool = registeredTools.get(tool.name) ?? tool;
+            const approvedCaps = await getApprovedCapabilities(liveTool);
 
             let deprecationWarning = "";
-            if (tool.failingSince) {
-                const daysSince = Math.floor((Date.now() - new Date(tool.failingSince).getTime()) / 86400000);
-                deprecationWarning = `⚠️ This tool has been failing since ${tool.failingSince} (${daysSince}d). Consider calling update_tool to fix it.\n\n`;
+            if (liveTool.failingSince) {
+                const daysSince = Math.floor((Date.now() - new Date(liveTool.failingSince).getTime()) / 86400000);
+                deprecationWarning = `⚠️ This tool has been failing since ${liveTool.failingSince} (${daysSince}d). Consider calling update_tool to fix it.\n\n`;
             }
 
-            if (tool.rateLimit) {
-                const rateCheck = await checkRateLimit(tool.name, tool.rateLimit);
+            if (liveTool.rateLimit) {
+                const rateCheck = await checkRateLimit(liveTool.name, liveTool.rateLimit);
                 if (!rateCheck.allowed) {
-                    await logAudit("tool_execution_failed", tool.name, { reason: rateCheck.reason });
+                    await logAudit("tool_execution_failed", liveTool.name, { reason: rateCheck.reason });
                     return createToolResponse(`Rate limit: ${rateCheck.reason}`);
                 }
-                await recordRateLimitCall(tool.name);
+                await recordRateLimitCall(liveTool.name);
             }
 
-            if (tool.cache) {
-                const cached = await getCachedResult(tool.name, params, tool.cache);
+            if (liveTool.cache) {
+                const cached = await getCachedResult(liveTool.name, params, liveTool.cache);
                 if (cached.hit) {
                     return createToolResponse(await redactSecrets(stringifyResult(cached.result)) + "\n\n(cached)");
                 }
             }
 
             const sandbox = new ToolSandbox({
-                timeoutMs: tool.timeoutMs ?? 10000,
+                timeoutMs: liveTool.timeoutMs ?? 10000,
                 capabilities: approvedCaps,
-                imports: tool.imports ?? [],
+                imports: liveTool.imports ?? [],
                 toolCaller: (n, p) => callToolInternal(n, p, 1)
             });
 
             try {
                 const executeFn = async () => {
-                    const r = await sandbox.execute(tool.code, params);
+                    const r = await sandbox.execute(liveTool.code, params);
                     if (!r.success) throw new Error(r.error);
                     return r;
                 };
 
                 let result;
-                if (tool.retry) {
-                    result = await executeWithRetry(executeFn, tool.retry);
+                if (liveTool.retry) {
+                    result = await executeWithRetry(executeFn, liveTool.retry);
                 } else {
                     result = await executeFn();
                 }
 
                 const duration = Date.now() - startTime;
-                await recordExecution(tool.name, true, duration);
-                await logAudit("tool_executed", tool.name, {}, duration);
+                await recordExecution(liveTool.name, true, duration);
+                await logAudit("tool_executed", liveTool.name, {}, duration);
 
-                if (tool.cache) {
-                    await setCachedResult(tool.name, params, result.result, tool.cache);
+                if (liveTool.cache) {
+                    await setCachedResult(liveTool.name, params, result.result, liveTool.cache);
                 }
 
                 let output = stringifyResult(result.result);
@@ -437,10 +433,60 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
             } finally {
                 sandbox.dispose();
             }
-        }
-    );
+        };
+}
 
+function registerToolOnServer(target: McpServer, tool: CustomTool, approvedCaps: Awaited<ReturnType<typeof getApprovedCapabilities>>): void {
+    const zodSchema = jsonSchemaToZod(tool.schema);
+    target.registerTool(
+        tool.name,
+        {
+            description: tool.description,
+            inputSchema: zodSchema,
+        },
+        buildCustomToolHandler(tool, approvedCaps)
+    );
+}
+
+async function registerCustomTool(tool: CustomTool): Promise<void> {
+    const approvedCaps = await getApprovedCapabilities(tool);
+    registerToolOnServer(server, tool, approvedCaps);
+    for (const s of httpSessionServers) {
+        try {
+            registerToolOnServer(s, tool, approvedCaps);
+        } catch (err) {
+            console.error(`Failed to register tool '${tool.name}' on HTTP session server:`, err instanceof Error ? err.message : err);
+        }
+    }
     registeredTools.set(tool.name, tool);
+}
+
+function createHttpMcpServer(): McpServer {
+    const s = new McpServer({
+        name: "architect-mcp-server",
+        version: "1.0.0",
+    }, {
+        capabilities: {
+            tools: {
+                listChanged: true
+            }
+        }
+    });
+    registerGateways(s);
+    // Custom tools: register with currently approved caps (sync via cached permission read is async —
+    // use last-known tool object; handler re-reads approvals at execute time via getApprovedCapabilities in sandbox path).
+    for (const tool of registeredTools.values()) {
+        try {
+            // Caps re-checked inside execution via permission store; register with empty and let handler use live caps.
+            // Actually buildCustomToolHandler closes over approvedCaps at register time — fetch sync from map:
+            registerToolOnServer(s, tool, []);
+        } catch {
+            /* ignore duplicate */
+        }
+    }
+    httpSessionServers.add(s);
+    // Detach tracking when server has no more refs is best-effort; sessions cleaned on transport close
+    return s;
 }
 
 async function unregisterCustomTool(name: string): Promise<void> {
@@ -3254,7 +3300,7 @@ async function gracefulShutdown(): Promise<void> {
             updated: Array.from(new Set(sessionLog.updated)),
             errors: sessionLog.errors
         };
-        await setMemory("sessions", "last_session", JSON.stringify(sessionData));
+        await setMemory("last_session", JSON.stringify(sessionData), "sessions");
     } catch (err) {
         console.error("Failed to save session context", err);
     }
@@ -3266,6 +3312,7 @@ async function gracefulShutdown(): Promise<void> {
     await flushCache();
     stopWebhookServer();
     stopDashboard();
+    stopMcpHttpServer();
     disposeSandboxPool();
     process.exit(0);
 }
@@ -3290,11 +3337,10 @@ async function main(): Promise<void> {
     startScheduler(callToolInternal);
     startDeprecationChecker(async () => readAllTools(), writeToolData);
     startAnomalyChecker();
-    if ((await listAllWebhooks()).length > 0) {
-        startWebhookServer(3002, callToolInternal);
-    }
+    // Always bind webhook port so reverse proxies do not 502 when idle
+    startWebhookServer(3002, callToolInternal);
     startDashboard(
-        3001,
+        Number(process.env.ARCHITECT_DASHBOARD_PORT ?? 3001),
         () => registeredTools,
         async () => getAllToolFiles(),
         async (name: string) => readToolData(name),
@@ -3325,10 +3371,28 @@ async function main(): Promise<void> {
         }
     );
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    const httpPort = Number(process.env.ARCHITECT_MCP_HTTP_PORT ?? 3003);
+    const enableHttp = process.env.ARCHITECT_MCP_HTTP !== "0";
+    const enableStdio = process.env.ARCHITECT_MCP_STDIO === "1" || Boolean(process.stdin.isTTY);
 
-    console.error(`architect-mcp started with ${registeredTools.size} tools.`);
+    if (enableHttp) {
+        const authSecret = process.env.MCP_HTTP_SECRET || process.env.DASHBOARD_SECRET;
+        startMcpHttpServer({
+            port: httpPort,
+            authSecret,
+            createServer: createHttpMcpServer
+        });
+    }
+
+    if (enableStdio) {
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+        console.error("MCP stdio transport connected");
+    } else if (!enableHttp) {
+        console.error("No MCP transport enabled (set ARCHITECT_MCP_HTTP!=0 or ARCHITECT_MCP_STDIO=1)");
+    }
+
+    console.error(`architect-mcp started with ${registeredTools.size} tools (http=${enableHttp ? httpPort : "off"}, stdio=${enableStdio}).`);
 }
 
 main().catch((error) => {
