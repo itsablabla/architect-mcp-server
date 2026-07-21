@@ -51,6 +51,17 @@ export function startDashboard(
         });
     });
 
+    const dashboardSecret = process.env.DASHBOARD_SECRET;
+    if (dashboardSecret) {
+        app.use("/api/*", async (c, next) => {
+            const auth = c.req.header("Authorization");
+            if (!auth || auth !== `Bearer ${dashboardSecret}`) {
+                return c.json({ error: "Unauthorized" }, 401);
+            }
+            await next();
+        });
+    }
+
     app.get("/api/tools", async (c) => {
         try {
             const activeTools = getTools();
@@ -521,17 +532,6 @@ export function startDashboard(
             }
         }
     });
-
-    const dashboardSecret = process.env.DASHBOARD_SECRET;
-    if (dashboardSecret) {
-        app.use("/api/*", async (c, next) => {
-            const auth = c.req.header("Authorization");
-            if (!auth || auth !== `Bearer ${dashboardSecret}`) {
-                return c.json({ error: "Unauthorized" }, 401);
-            }
-            await next();
-        });
-    }
 
     try {
         dashboardServer = serve({ fetch: app.fetch, port });
