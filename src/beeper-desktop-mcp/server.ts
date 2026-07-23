@@ -71,12 +71,13 @@ export function createBeeperDesktopMcpServer(client?: BeeperDesktopClient): McpS
                     };
                 }
                 const list = Array.isArray(accounts) ? accounts : [];
+                const healthOk = !(health && typeof health === "object" && health.ok === false);
                 return textResult({
-                    ok: true,
+                    ok: healthOk && list.length >= 0,
                     baseUrl: c.baseUrl,
                     mcpUrl: c.mcpUrl,
                     token_fp: `${c.accessToken.slice(0, 5)}…${c.accessToken.slice(-4)}`,
-                    health,
+                    health: health ?? { ok: true, empty: true },
                     account_count: list.length,
                     accounts: list.map((a: any) => ({
                         accountID: a.accountID,

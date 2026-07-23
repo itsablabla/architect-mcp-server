@@ -141,9 +141,27 @@ export class BeeperDesktopClient {
 
     async health(): Promise<any> {
         try {
-            return await this.rest("GET", "/health");
+            // Desktop /health often returns an empty 200 body.
+            let url = `${this.baseUrl}/health`;
+            const res = await this.fetchImpl(url, {
+                method: "GET",
+                headers: this.authHeaders()
+            });
+            const text = await res.text();
+            if (!res.ok) {
+                const parsed = await parseBody(text);
+                throw new BeeperDesktopError(
+                    `Desktop REST GET /health failed (${res.status})`,
+                    res.status,
+                    parsed
+                );
+            }
+            if (!text.trim()) {
+                return { ok: true, status: res.status, empty: true };
+            }
+            return await parseBody(text);
         } catch (err) {
-            return { error: err instanceof Error ? err.message : String(err) };
+            return { ok: false, error: err instanceof Error ? err.message : String(err) };
         }
     }
 
