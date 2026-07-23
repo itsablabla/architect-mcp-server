@@ -79,13 +79,31 @@ Or via the bin:
 BEEPER_DESKTOP_TOKEN=bdapi_… beeper-desktop-mcp
 ```
 
-MCP client config:
+MCP client config (local checkout):
 
 ```json
 {
   "mcpServers": {
     "beeper-desktop": {
-      "command": "beeper-desktop-mcp",
+      "command": "node",
+      "args": ["dist/beeper-desktop-mcp/index.js"],
+      "env": {
+        "BEEPER_DESKTOP_TOKEN": "bdapi_…",
+        "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
+      }
+    }
+  }
+}
+```
+
+Or after a global/package install:
+
+```json
+{
+  "mcpServers": {
+    "beeper-desktop": {
+      "command": "npx",
+      "args": ["-y", "architect-mcp-server", "beeper-desktop"],
       "env": {
         "BEEPER_DESKTOP_TOKEN": "bdapi_…",
         "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"

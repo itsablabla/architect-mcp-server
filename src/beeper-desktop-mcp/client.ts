@@ -31,13 +31,14 @@ function joinUrl(base: string, path: string): string {
 async function parseBody(raw: string): Promise<any> {
     const text = String(raw ?? "");
     if (!text.trim()) return null;
-    if (text.trim().startsWith("{") || text.trim().startsWith("[")) {
-        try {
-            return JSON.parse(text);
-        } catch {
-            /* fall through to SSE parse */
-        }
+
+    // Prefer full-body JSON first so scalars ("ok", true, 0, null) are preserved.
+    try {
+        return JSON.parse(text);
+    } catch {
+        /* fall through to SSE / raw handling */
     }
+
     for (const line of text.split(/\r?\n/)) {
         if (line.startsWith("data: ")) {
             try {
@@ -276,6 +277,11 @@ export class BeeperDesktopClient {
             );
         }
 
+        // Prefer official structured payloads over free-form text blocks.
+        if (msg?.result?.structuredContent !== undefined) {
+            return msg.result.structuredContent;
+        }
+
         const content = msg?.result?.content;
         if (Array.isArray(content)) {
             const texts = content
@@ -287,9 +293,6 @@ export class BeeperDesktopClient {
                 } catch {
                     return { text: texts[0] };
                 }
-            }
-            if (msg?.result?.structuredContent !== undefined) {
-                return msg.result.structuredContent;
             }
             return msg.result;
         }
