@@ -45,6 +45,23 @@ MCP client config (local checkout):
 }
 ```
 
+Package install / npx:
+
+```json
+{
+  "mcpServers": {
+    "beeper-desktop": {
+      "command": "npx",
+      "args": ["-y", "architect-mcp-server", "beeper-desktop"],
+      "env": {
+        "BEEPER_DESKTOP_TOKEN": "bdapi_xxx",
+        "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
+      }
+    }
+  }
+}
+```
+
 ## Tools
 
 **Helpers**

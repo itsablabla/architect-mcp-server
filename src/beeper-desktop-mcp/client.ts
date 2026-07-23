@@ -152,7 +152,24 @@ export class BeeperDesktopClient {
     }
 
     async listChatsRest(query: Record<string, unknown> = {}): Promise<any> {
-        return this.rest("GET", "/v1/chats", query);
+        const result = await this.rest<any>("GET", "/v1/chats", query);
+        // Desktop API may ignore limit; enforce it client-side when present.
+        const limit = typeof query.limit === "number" ? query.limit : undefined;
+        if (
+            limit != null &&
+            limit > 0 &&
+            result &&
+            typeof result === "object" &&
+            Array.isArray(result.items) &&
+            result.items.length > limit
+        ) {
+            return {
+                ...result,
+                items: result.items.slice(0, limit),
+                hasMore: true
+            };
+        }
+        return result;
     }
 
     private async ensureMcpSession(): Promise<Record<string, string>> {

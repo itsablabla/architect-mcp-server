@@ -113,6 +113,14 @@ Or after a global/package install:
 }
 ```
 
+Equivalent bin forms:
+
+```bash
+npx -y -p architect-mcp-server beeper-desktop-mcp
+# or
+architect-mcp beeper-desktop
+```
+
 Tools include the official Desktop MCP set (`get_accounts`, `search_chats`, `list_messages`, `send_message`, …) plus helpers (`beeper_health`, `list_chats`, `desktop_tools`, `desktop_mcp_call`).
 
 ### 2. Docker Setup (Recommended)

@@ -12,6 +12,7 @@
     "bin",
     "dashboard",
     "assets",
+    "docs",
     "README.md",
     "LICENSE"
   ],
