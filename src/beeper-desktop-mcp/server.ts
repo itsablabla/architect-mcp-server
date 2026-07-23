@@ -371,10 +371,21 @@ export function createBeeperDesktopMcpServer(client?: BeeperDesktopClient): McpS
         "search_docs",
         {
             description:
-                "Search for documentation for how to use the client to interact with the API.",
+                "Search for documentation for how to use the client to interact with the API. language must be an SDK id (typescript, python, http, go, ...).",
             inputSchema: z.object({
                 query: z.string(),
-                language: z.string().default("en")
+                language: z
+                    .enum([
+                        "http",
+                        "python",
+                        "go",
+                        "typescript",
+                        "terraform",
+                        "ruby",
+                        "java",
+                        "kotlin"
+                    ])
+                    .default("typescript")
             })
         },
         async (args) => {

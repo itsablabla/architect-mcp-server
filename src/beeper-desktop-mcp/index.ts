@@ -13,12 +13,26 @@ Environment:
 Examples:
   BEEPER_DESKTOP_TOKEN=bdapi_… BEEPER_DESKTOP_URL=http://127.0.0.1:23373 beeper-desktop-mcp
 
-  # Claude Desktop / Cursor mcp.json (local checkout)
+  # Local checkout mcp.json
   {
     "mcpServers": {
       "beeper-desktop": {
         "command": "node",
         "args": ["dist/beeper-desktop-mcp/index.js"],
+        "env": {
+          "BEEPER_DESKTOP_TOKEN": "bdapi_…",
+          "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
+        }
+      }
+    }
+  }
+
+  # Package install (npx package + subcommand)
+  {
+    "mcpServers": {
+      "beeper-desktop": {
+        "command": "npx",
+        "args": ["-y", "architect-mcp-server", "beeper-desktop"],
         "env": {
           "BEEPER_DESKTOP_TOKEN": "bdapi_…",
           "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
