@@ -180,6 +180,15 @@ function ensureDir(): Promise<void> {
     return Promise.resolve();
 }
 
+/** When false (default), only the 8 gateway tools are advertised on MCP tools/list.
+ *  Custom tools stay executable via run {action:"call_tool"} / batch_execute / pipelines / webhooks.
+ *  Set ARCHITECT_EXPOSE_CUSTOM_TOOLS=1 to restore legacy flat MCP export of every custom tool.
+ */
+function exposeCustomToolsAsMcp(): boolean {
+    const v = (process.env.ARCHITECT_EXPOSE_CUSTOM_TOOLS ?? "0").trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 const ACTION_GATEWAY: Record<string, string> = {
     create_tool: "tool", update_tool: "tool", mark_tool_deprecated: "tool",
     validate_tool: "tool", save_tool: "tool", approve_tool: "tool",
@@ -190,6 +199,7 @@ const ACTION_GATEWAY: Record<string, string> = {
     export_tool: "tool", import_tool: "tool",
     list_tools: "find", search_tools: "find", get_tool_source: "find",
     get_tool_graph: "find", match_intent: "find",
+    call_tool: "run",
     batch_execute: "run",
     create_alias: "run", delete_alias: "run", list_aliases: "run", execute_alias: "run",
     create_pipeline: "run", execute_pipeline: "run",
@@ -220,9 +230,9 @@ const ACTION_GATEWAY: Record<string, string> = {
 };
 
 const GATEWAY_DESCRIPTIONS: Record<string, string> = {
-    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. Created tools become directly callable MCP tools.",
+    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. After create/save, invoke tools via run {action:\"call_tool\"} (or find to discover names).",
     find: "Discover existing tools before building: list, full-text search, view source, dependency graph, intent matching.",
-    run: "Compose and execute tools: batches, aliases with preset params, multi-step pipelines.",
+    run: "Execute custom tools and compose workflows: call_tool (single), batch_execute, aliases, multi-step pipelines.",
     automate: "Run tools in the background: cron schedules and HTTP webhooks.",
     store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
     share: "Tool marketplace: publish, browse, install from remote registries and peers.",
@@ -450,6 +460,11 @@ function registerToolOnServer(target: McpServer, tool: CustomTool, approvedCaps:
 
 async function registerCustomTool(tool: CustomTool): Promise<void> {
     const approvedCaps = await getApprovedCapabilities(tool);
+    // Always keep in the internal registry so call_tool / pipelines / webhooks / sandbox callTool work.
+    registeredTools.set(tool.name, tool);
+    if (!exposeCustomToolsAsMcp()) {
+        return;
+    }
     registerToolOnServer(server, tool, approvedCaps);
     for (const s of httpSessionServers) {
         try {
@@ -458,7 +473,6 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
             console.error(`Failed to register tool '${tool.name}' on HTTP session server:`, err instanceof Error ? err.message : err);
         }
     }
-    registeredTools.set(tool.name, tool);
 }
 
 function createHttpMcpServer(): McpServer {
@@ -473,15 +487,15 @@ function createHttpMcpServer(): McpServer {
         }
     });
     registerGateways(s);
-    // Custom tools: register with currently approved caps (sync via cached permission read is async —
-    // use last-known tool object; handler re-reads approvals at execute time via getApprovedCapabilities in sandbox path).
-    for (const tool of registeredTools.values()) {
-        try {
-            // Caps re-checked inside execution via permission store; register with empty and let handler use live caps.
-            // Actually buildCustomToolHandler closes over approvedCaps at register time — fetch sync from map:
-            registerToolOnServer(s, tool, []);
-        } catch {
-            /* ignore duplicate */
+    // Optional legacy mode: advertise every custom tool on MCP tools/list (expensive for client context).
+    if (exposeCustomToolsAsMcp()) {
+        for (const tool of registeredTools.values()) {
+            try {
+                // Caps re-checked inside execution via permission store.
+                registerToolOnServer(s, tool, []);
+            } catch {
+                /* ignore duplicate */
+            }
         }
     }
     httpSessionServers.add(s);
@@ -1784,6 +1798,43 @@ defineAction(
             }
             const result = await callToolInternal(resolved.toolName, resolved.mergedParams);
             return createToolResponse(JSON.stringify(result, null, 2));
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+defineAction(
+    "call_tool",
+    {
+        description: "Execute one custom/active tool by name with a params object. Prefer find {action:\"search_tools\"|\"list_tools\"|\"match_intent\"} to discover names first. This is the primary way to invoke custom tools when they are not individually listed on MCP tools/list.",
+        inputSchema: z.object({
+            name: z.string().describe("Tool name to execute"),
+            params: z.record(z.string(), z.unknown()).optional().describe("Arguments for the tool"),
+            args: z.record(z.string(), z.unknown()).optional().describe("Alias of params")
+        }),
+    },
+    async ({ name, params, args }) => {
+        try {
+            const tool = registeredTools.get(name);
+            if (!tool) {
+                // Fall back to DB lookup so recently approved tools still run even if map is stale
+                if (!(await toolExists(name))) {
+                    return createToolResponse(`Tool '${name}' not found or not active. Use find {action:"search_tools"} to discover tools.`);
+                }
+                const fromDb = await readToolData(name);
+                const { approved, reason } = await checkToolApproval(fromDb);
+                if (!approved) {
+                    return createToolResponse(`Tool '${name}' exists but is not approved: ${reason ?? "capabilities not approved"}. Use tool {action:"approve_tool"}.`);
+                }
+                await registerCustomTool(fromDb);
+            }
+            const live = registeredTools.get(name);
+            if (!live) {
+                return createToolResponse(`Tool '${name}' failed to activate.`);
+            }
+            const handler = buildCustomToolHandler(live);
+            return await handler((params ?? args ?? {}) as Record<string, unknown>);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -3397,6 +3448,12 @@ async function main(): Promise<void> {
     } else if (!enableHttp) {
         console.error("No MCP transport enabled (set ARCHITECT_MCP_HTTP!=0 or ARCHITECT_MCP_STDIO=1)");
     }
+
+    console.error(
+        `architect-mcp tool surface: gateways=8, custom_active=${registeredTools.size}, ` +
+        `mcp_expose_custom=${exposeCustomToolsAsMcp() ? "on" : "off"} ` +
+        `(ARCHITECT_EXPOSE_CUSTOM_TOOLS)`
+    );
 
     console.error(`architect-mcp started with ${registeredTools.size} tools (http=${enableHttp ? httpPort : "off"}, stdio=${enableStdio}).`);
 }
