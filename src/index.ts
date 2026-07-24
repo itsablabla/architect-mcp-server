@@ -1078,14 +1078,15 @@ defineAction(
 defineAction(
     "list_tools",
     {
-        description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists.",
+        description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists. Deprecated tools are hidden unless include_deprecated=true.",
         inputSchema: z.object({
             active_only: z.boolean().optional(),
+            include_deprecated: z.boolean().optional().describe("Include deprecated tools (default false)"),
             category: z.enum(["api", "file", "data", "utility", "automation", "integration", "other"]).optional(),
             tag: z.string().optional()
         }),
     },
-    async ({ active_only, category, tag }) => {
+    async ({ active_only, include_deprecated, category, tag }) => {
         try {
             const files = await getAllToolFiles();
             if (files.length === 0) {
@@ -1100,6 +1101,7 @@ defineAction(
 
                 try {
                     const tool = await readToolData(name);
+                    if (tool.deprecated && !include_deprecated) continue;
                     if (category && tool.category !== category) continue;
                     if (tag && !tool.tags?.includes(tag)) continue;
 
@@ -2604,9 +2606,11 @@ defineAction(
     async ({ query, limit = 10 }) => {
         try {
             const files = await getAllToolFiles();
-            const tools = await Promise.all(
-                files.map(f => readToolData(f.replace(".json", "")))
-            );
+            const tools = (
+                await Promise.all(
+                    files.map(f => readToolData(f.replace(".json", "")))
+                )
+            ).filter(t => !t.deprecated);
 
             const response = matchIntent(query, tools);
             const matches = response.matches.slice(0, limit);
@@ -3320,6 +3324,11 @@ async function loadExistingTools(): Promise<void> {
         const name = file.replace(".json", "");
         try {
             const tool = await readToolData(name);
+            if (tool.deprecated) {
+                // Keep in DB for backward-compatible call_tool, but do not activate.
+                registeredTools.delete(name);
+                continue;
+            }
             const { approved, reason } = await checkToolApproval(tool);
             if (!approved) {
                 quarantinedTools.push({ name, reason: reason ?? "Capabilities not approved" });
