@@ -2,8 +2,71 @@ function escHtml(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+const TOKEN_KEY = "architect_dashboard_secret";
+
 const app = {
     currentSection: "overview",
+
+    getSecret() {
+        return sessionStorage.getItem(TOKEN_KEY) || "";
+    },
+
+    setSecret(secret) {
+        if (secret) sessionStorage.setItem(TOKEN_KEY, secret);
+        else sessionStorage.removeItem(TOKEN_KEY);
+    },
+
+    authHeaders(extra = {}) {
+        const headers = { ...extra };
+        const secret = this.getSecret();
+        if (secret) headers.Authorization = `Bearer ${secret}`;
+        return headers;
+    },
+
+    async ensureSecret() {
+        if (this.getSecret()) return true;
+        const entered = window.prompt("Enter DASHBOARD_SECRET to unlock the dashboard:");
+        if (!entered) return false;
+        this.setSecret(entered.trim());
+        return true;
+    },
+
+    async apiFetch(path, options = {}) {
+        const opts = { ...options };
+        const baseHeaders = opts.headers || {};
+        opts.headers = this.authHeaders(baseHeaders);
+
+        let res = await fetch(path, opts);
+        if (res.status === 401) {
+            this.setSecret("");
+            const ok = await this.ensureSecret();
+            if (!ok) {
+                const err = new Error("Unauthorized");
+                err.status = 401;
+                throw err;
+            }
+            opts.headers = this.authHeaders(baseHeaders);
+            res = await fetch(path, opts);
+        }
+        if (!res.ok) {
+            let detail = res.statusText;
+            try {
+                const body = await res.json();
+                if (body?.error) detail = body.error;
+            } catch {}
+            const err = new Error(detail || `HTTP ${res.status}`);
+            err.status = res.status;
+            throw err;
+        }
+        if (res.status === 204) return null;
+        const text = await res.text();
+        if (!text) return null;
+        try {
+            return JSON.parse(text);
+        } catch {
+            return text;
+        }
+    },
 
     async init() {
         this.bindNavigation();
@@ -44,19 +107,28 @@ const app = {
                 case "pipelines": await this.renderPipelines(content); break;
                 case "cache": await this.renderCache(content); break;
                 case "secrets": await this.renderSecrets(content); break;
+                case "memory": await this.renderMemory(content); break;
                 case "aliases": await this.renderAliases(content); break;
                 case "marketplace": await this.renderMarketplace(content); break;
                 case "resources": await this.renderResources(content); break;
                 case "prompts": await this.renderPrompts(content); break;
             }
         } catch (err) {
-            content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#10060;</div><div class="empty-state-text">Failed to load data</div></div>';
+            const msg = err?.status === 401
+                ? "Unauthorized — click Unlock and enter DASHBOARD_SECRET"
+                : (err?.message || "Failed to load data");
+            content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">&#10060;</div><div class="empty-state-text">${escHtml(msg)}</div><div style="margin-top:12px"><button class="btn btn-primary" onclick="app.unlock()">Unlock</button></div></div>`;
         }
     },
 
+    async unlock() {
+        this.setSecret("");
+        const ok = await this.ensureSecret();
+        if (ok) await this.refresh();
+    },
+
     async fetchApi(endpoint) {
-        const res = await fetch(`/api/${endpoint}`);
-        return res.json();
+        return this.apiFetch(`/api/${endpoint}`);
     },
 
     async renderOverview(el) {
@@ -257,7 +329,7 @@ const app = {
     },
 
     async clearCache() {
-        await fetch("/api/cache", { method: "DELETE" });
+        await this.apiFetch("/api/cache", { method: "DELETE" });
         await this.renderCache(document.getElementById("main-content"));
     },
 
@@ -270,6 +342,17 @@ const app = {
 
         el.innerHTML = '<div class="card"><div class="card-header"><h3>Stored Secrets</h3></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Created</th><th>Updated</th></tr></thead><tbody>' +
             secrets.map(s => `<tr><td>${escHtml(s.name)}</td><td>${escHtml(new Date(s.createdAt).toLocaleString())}</td><td>${escHtml(new Date(s.updatedAt).toLocaleString())}</td></tr>`).join("") +
+            '</tbody></table></div></div></div>';
+    },
+
+    async renderMemory(el) {
+        const rows = await this.fetchApi("memory");
+        if (!rows || rows.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#129504;</div><div class="empty-state-text">No memory entries</div><div class="empty-state-text" style="opacity:.7;margin-top:8px">Agents store KV memory via store gateway (set_memory).</div></div>';
+            return;
+        }
+        el.innerHTML = '<div class="card"><div class="card-header"><h3>Key-Value Memory</h3></div><div class="card-body"><div class="table-wrap"><table><thead><tr><th>Namespace</th><th>Key</th><th>Value</th></tr></thead><tbody>' +
+            rows.map(r => `<tr><td>${escHtml(r.namespace || r.ns || "")}</td><td>${escHtml(r.key)}</td><td><code>${escHtml(typeof r.value === "string" ? r.value : JSON.stringify(r.value))}</code></td></tr>`).join("") +
             '</tbody></table></div></div></div>';
     },
 
@@ -288,7 +371,14 @@ const app = {
     async renderMarketplace(el) {
         const entries = await this.fetchApi("marketplace");
         if (entries.length === 0) {
-            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#127978;</div><div class="empty-state-text">Marketplace is empty</div></div>';
+            el.innerHTML = `<div class="empty-state">
+                <div class="empty-state-icon">&#127978;</div>
+                <div class="empty-state-text">Marketplace is empty</div>
+                <div class="empty-state-text" style="opacity:.75;margin-top:10px;max-width:420px;margin-left:auto;margin-right:auto;line-height:1.45">
+                  Local exports and the public GitHub registry both have no tools yet.
+                  Create a tool via MCP, then <code>marketplace_export</code>, or set secret <code>GITHUB_TOKEN</code> and <code>marketplace_publish</code> / <code>marketplace_browse</code>.
+                </div>
+              </div>`;
             return;
         }
 
@@ -345,7 +435,7 @@ const app = {
     async approveTool(name) {
         if (!confirm(`Approve capabilities for tool '${name}'?`)) return;
         try {
-            await fetch(`/api/tools/${encodeURIComponent(name)}/approve`, { method: "POST" });
+            await this.apiFetch(`/api/tools/${encodeURIComponent(name)}/approve`, { method: "POST" });
             app.refresh();
         } catch (e) {
             alert("Approval failed: " + e.message);
@@ -384,12 +474,11 @@ const app = {
         respEl.textContent = "Executing...";
 
         try {
-            const res = await fetch(`/api/tools/${encodeURIComponent(this.currentTool)}/run`, {
+            const data = await this.apiFetch(`/api/tools/${encodeURIComponent(this.currentTool)}/run`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ params })
             });
-            const data = await res.json();
             if (data.success) {
                 respEl.textContent = "Success (" + data.durationMs + "ms):\n" + JSON.stringify(data.result, null, 2);
                 respEl.style.color = "var(--success)";
@@ -439,12 +528,11 @@ const app = {
         const code = this.editor.getValue();
 
         try {
-            const res = await fetch(`/api/tools/${encodeURIComponent(this.currentTool)}/code`, {
+            const data = await this.apiFetch(`/api/tools/${encodeURIComponent(this.currentTool)}/code`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code })
             });
-            const data = await res.json();
             if (data.success) {
                 this.closeEditModal();
                 app.refresh();
