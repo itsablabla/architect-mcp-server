@@ -39,7 +39,7 @@ import { runToolTests, formatTestResults } from "./tools/testing.js";
 import { createAlias, deleteAlias, getAlias, listAllAliases, resolveAlias, resolveAliasParams } from "./tools/aliases.js";
 import { executeBatch, formatBatchResult } from "./execution/batch.js";
 import { createPipeline, getPipeline, deletePipeline, listAllPipelines, executePipeline, formatPipelineResult } from "./execution/pipelines.js";
-import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
+import { listAllSchedules, startScheduler, stopScheduler, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
 import { createWebhook, deleteWebhook, listAllWebhooks, startWebhookServer, stopWebhookServer, formatWebhook } from "./execution/webhooks.js";
 import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote, reportToolIssue, publishToolStats, add_marketplace_peer, list_marketplace_peers } from "./tools/marketplace.js";
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
@@ -204,7 +204,6 @@ const ACTION_GATEWAY: Record<string, string> = {
     create_alias: "run", delete_alias: "run", list_aliases: "run", execute_alias: "run",
     create_pipeline: "run", execute_pipeline: "run",
     delete_pipeline: "run", list_pipelines: "run",
-    create_schedule: "automate", delete_schedule: "automate", list_schedules: "automate",
     create_webhook: "automate", delete_webhook: "automate", list_webhooks: "automate",
     set_secret: "store", get_secret: "store", delete_secret: "store", list_secrets: "store",
     set_memory: "store", get_memory: "store", delete_memory: "store",
@@ -233,7 +232,7 @@ const GATEWAY_DESCRIPTIONS: Record<string, string> = {
     tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. After create/save, invoke tools via run {action:\"call_tool\"} (or find to discover names).",
     find: "Discover existing tools before building: list, full-text search, view source, dependency graph, intent matching.",
     run: "Execute custom tools and compose workflows: call_tool (single), batch_execute, aliases, multi-step pipelines.",
-    automate: "Run tools in the background: cron schedules and HTTP webhooks.",
+    automate: "Run tools in the background through HTTP webhooks.",
     store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
     share: "Tool marketplace: publish, browse, install from remote registries and peers.",
     admin: "Operations: execution stats, audit logs, caches, anomaly detection, repair proposals, personas, system status.",
@@ -1986,79 +1985,6 @@ defineAction(
                 `${p.name} - ${p.description} (${p.steps.length} steps)`
             ).join("\n");
             return createToolResponse(`Pipelines (${pipelines.length}):\n\n${output}`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "create_schedule",
-    {
-        description: "Schedule a tool to run automatically on a cron expression. Create a schedule immediately after building any tool for a recurring task — do not wait to be asked.",
-        inputSchema: z.object({
-            tool_name: z.string(),
-            cron: z.string().describe("Cron expression (e.g. '*/5 * * * *')"),
-            params: z.string().default("{}").describe("JSON tool parameters")
-        }),
-    },
-    async ({ tool_name, cron, params }) => {
-        try {
-            let parsedParams: Record<string, unknown>;
-            try {
-                parsedParams = JSON.parse(params);
-            } catch {
-                return createToolResponse("Invalid params JSON.");
-            }
-
-            const schedule = await addSchedule({
-                toolName: tool_name,
-                cron,
-                params: parsedParams
-            });
-
-            await logAudit("schedule_created", tool_name, { scheduleId: schedule.id, cron });
-            return createToolResponse(`Schedule created:\n${formatSchedule(schedule)}`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "delete_schedule",
-    {
-        description: "Delete a schedule. The tool itself is not affected.",
-        inputSchema: z.object({ id: z.string() }),
-    },
-    async ({ id }) => {
-        try {
-            const deleted = await removeSchedule(id);
-            if (!deleted) {
-                return createToolResponse(`Schedule '${id}' not found.`);
-            }
-            await logAudit("schedule_deleted", id);
-            return createToolResponse(`Schedule '${id}' deleted.`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "list_schedules",
-    {
-        description: "List all active schedules with next run times.",
-        inputSchema: z.object({}),
-    },
-    async () => {
-        try {
-            const schedules = await listAllSchedules();
-            if (schedules.length === 0) {
-                return createToolResponse("No schedules configured.");
-            }
-            const output = schedules.map(formatSchedule).join("\n\n");
-            return createToolResponse(`Schedules (${schedules.length}):\n\n${output}`);
         } catch (error) {
             return createErrorResponse(error);
         }
