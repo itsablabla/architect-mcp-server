@@ -1,4 +1,9 @@
 import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+
+const agentBrowserEntrypoint = fileURLToPath(
+    new URL("../../node_modules/agent-browser/bin/agent-browser.js", import.meta.url)
+);
 
 export interface BrowserResult {
     success: boolean;
@@ -54,7 +59,7 @@ export function runBrowserCommand(
         let stdout = "";
         let stderr = "";
 
-        const proc = spawn("agent-browser", finalArgs, {
+        const proc = spawn(process.execPath, [agentBrowserEntrypoint, ...finalArgs], {
             timeout: timeoutMs,
             env: { ...process.env }
         });
@@ -87,7 +92,7 @@ export function runBrowserCommand(
             resolve({
                 success: false,
                 error: err.message.includes("ENOENT")
-                    ? "agent-browser not found. Install with: npm install -g agent-browser && agent-browser install"
+                    ? "Bundled agent-browser runtime not found. Reinstall server dependencies."
                     : err.message
             });
         });

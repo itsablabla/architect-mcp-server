@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getDb } from "./core/db.js";
@@ -67,6 +67,7 @@ const server = new McpServer({
 });
 
 const registeredTools = new Map<string, CustomTool>();
+const registeredToolHandles = new Map<string, RegisteredTool>();
 let cacheSyncInterval: NodeJS.Timeout | null = null;
 const sessionLog: { created: string[], updated: string[], errors: string[] } = { created: [], updated: [], errors: [] };
 let knowledgeShown = false;
@@ -363,7 +364,9 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
     const zodSchema = jsonSchemaToZod(tool.schema);
     const approvedCaps = await getApprovedCapabilities(tool);
 
-    server.registerTool(
+    await unregisterCustomTool(tool.name);
+
+    const handle = server.registerTool(
         tool.name,
         {
             description: tool.description,
@@ -440,10 +443,13 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
         }
     );
 
+    registeredToolHandles.set(tool.name, handle);
     registeredTools.set(tool.name, tool);
 }
 
 async function unregisterCustomTool(name: string): Promise<void> {
+    registeredToolHandles.get(name)?.remove();
+    registeredToolHandles.delete(name);
     registeredTools.delete(name);
 }
 
