@@ -34,6 +34,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.11",
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "agent-browser": "^0.33.0",
     "better-sqlite3": "^12.6.2",
     "cron-parser": "^5.5.0",
     "hono": "^4.12.7",
