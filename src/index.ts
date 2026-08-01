@@ -343,6 +343,15 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
         throw new Error(`Tool call depth limit (${MAX_TOOL_CALL_DEPTH}) exceeded. Possible circular dependency involving '${name}'.`);
     }
 
+    const action = typeof params.action === "string" ? params.action : null;
+    const gatewayAction = action ? actionRegistry.get(action) : null;
+    if (gatewayAction?.gateway === name) {
+        const parsed = gatewayAction.schema.parse(
+            params.args && typeof params.args === "object" ? params.args : {}
+        );
+        return gatewayAction.handler(parsed);
+    }
+
     const tool = registeredTools.get(name);
     if (!tool) {
         throw new Error(`Tool '${name}' not found or not active`);
