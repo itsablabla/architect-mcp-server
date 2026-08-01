@@ -346,8 +346,9 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
     const action = typeof params.action === "string" ? params.action : null;
     const gatewayAction = action ? actionRegistry.get(action) : null;
     if (gatewayAction?.gateway === name) {
+        const { action: _action, ...topLevelArgs } = params;
         const parsed = gatewayAction.schema.parse(
-            params.args && typeof params.args === "object" ? params.args : {}
+            params.args && typeof params.args === "object" ? params.args : topLevelArgs
         );
         return gatewayAction.handler(parsed);
     }
