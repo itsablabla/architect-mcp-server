@@ -1,0 +1,26 @@
+mcp.garza.online {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	handle /mcp* {
+		reverse_proxy architect-mcp:3003
+	}
+
+	handle /webhook* {
+		reverse_proxy architect-mcp:3002
+	}
+
+	handle {
+		reverse_proxy architect-mcp:3001
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

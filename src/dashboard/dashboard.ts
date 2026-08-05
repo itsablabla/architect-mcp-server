@@ -16,7 +16,8 @@ import { listAllSchedules } from "../execution/scheduler.js";
 import { listAllWebhooks } from "../execution/webhooks.js";
 import { listAllPipelines } from "../execution/pipelines.js";
 import { listAllAliases } from "../tools/aliases.js";
-import { listMarketplace, importFromMarketplace } from "../tools/marketplace.js";
+import { listMarketplace, importFromMarketplace, browseRemote } from "../tools/marketplace.js";
+import { getSecret } from "../core/secrets.js";
 import { listAllResources } from "../mcp/resources.js";
 import { listAllPrompts } from "../mcp/prompts.js";
 import { CustomTool } from "../types.js";
@@ -42,14 +43,33 @@ export function startDashboard(
     const app = new Hono();
     const startedAt = Date.now();
 
-    app.get("/health", (c) => {
+    app.get("/health", async (c) => {
+        let customStoredTools: number | null = null;
+        try {
+            customStoredTools = (await getAllToolFiles()).length;
+        } catch {
+            // Inventory is diagnostic; liveness must not depend on SQLite availability.
+        }
         return c.json({
             status: "ok",
             uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-            activeTools: getTools().size,
+            mcpAdvertisedTools: 8,
+            customActiveTools: getTools().size,
+            customStoredTools,
             pid: process.pid
         });
     });
+
+    const dashboardSecret = process.env.DASHBOARD_SECRET;
+    if (dashboardSecret) {
+        app.use("/api/*", async (c, next) => {
+            const auth = c.req.header("Authorization");
+            if (!auth || auth !== `Bearer ${dashboardSecret}`) {
+                return c.json({ error: "Unauthorized" }, 401);
+            }
+            await next();
+        });
+    }
 
     app.get("/api/tools", async (c) => {
         try {
@@ -420,8 +440,21 @@ export function startDashboard(
 
     app.get("/api/marketplace", async (c) => {
         try {
-            const entries = await listMarketplace();
-            return c.json(entries);
+            const local = await listMarketplace();
+            let remote: Awaited<ReturnType<typeof browseRemote>> = [];
+            try {
+                const token = await getSecret("GITHUB_TOKEN");
+                if (token) {
+                    remote = await browseRemote(token);
+                }
+            } catch {
+                /* remote optional */
+            }
+            const byId = new Map<string, unknown>();
+            for (const e of [...remote, ...local]) {
+                byId.set((e as any).id ?? (e as any).name, e);
+            }
+            return c.json(Array.from(byId.values()));
         } catch {
             return c.json([], 500);
         }
@@ -468,8 +501,9 @@ export function startDashboard(
             }
 
             return c.json({
-                totalTools: files.length,
-                activeTools: activeTools.size,
+                mcpAdvertisedTools: 8,
+                customStoredTools: files.length,
+                customActiveTools: activeTools.size,
                 totalCalls,
                 totalSuccess,
                 totalFailed,
@@ -503,13 +537,19 @@ export function startDashboard(
                 ".js": "application/javascript",
                 ".json": "application/json",
                 ".png": "image/png",
-                ".svg": "image/svg+xml"
+                ".svg": "image/svg+xml",
+                ".ico": "image/x-icon",
+                ".webp": "image/webp"
             };
             const contentType = mimeTypes[ext] || "application/octet-stream";
             return new Response(content, {
                 headers: { "Content-Type": contentType }
             });
         } catch {
+            // Missing static/asset files must not fall through to the SPA shell
+            if (reqPath.startsWith("/assets/") || /\.(js|css|png|svg|ico|webp|map)$/i.test(reqPath)) {
+                return c.text("Not found", 404);
+            }
             const indexPath = path.join(DASHBOARD_DIR, "index.html");
             try {
                 const content = await fs.readFile(indexPath);
@@ -521,17 +561,6 @@ export function startDashboard(
             }
         }
     });
-
-    const dashboardSecret = process.env.DASHBOARD_SECRET;
-    if (dashboardSecret) {
-        app.use("/api/*", async (c, next) => {
-            const auth = c.req.header("Authorization");
-            if (!auth || auth !== `Bearer ${dashboardSecret}`) {
-                return c.json({ error: "Unauthorized" }, 401);
-            }
-            await next();
-        });
-    }
 
     try {
         dashboardServer = serve({ fetch: app.fetch, port });

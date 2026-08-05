@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { startMcpHttpServer, stopMcpHttpServer } from "./mcp/http.js";
 import { z } from "zod";
 import { getDb } from "./core/db.js";
 import {
@@ -38,7 +39,7 @@ import { runToolTests, formatTestResults } from "./tools/testing.js";
 import { createAlias, deleteAlias, getAlias, listAllAliases, resolveAlias, resolveAliasParams } from "./tools/aliases.js";
 import { executeBatch, formatBatchResult } from "./execution/batch.js";
 import { createPipeline, getPipeline, deletePipeline, listAllPipelines, executePipeline, formatPipelineResult } from "./execution/pipelines.js";
-import { addSchedule, removeSchedule, listAllSchedules, startScheduler, stopScheduler, formatSchedule, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
+import { listAllSchedules, startScheduler, stopScheduler, startDeprecationChecker, stopDeprecationChecker } from "./execution/scheduler.js";
 import { createWebhook, deleteWebhook, listAllWebhooks, startWebhookServer, stopWebhookServer, formatWebhook } from "./execution/webhooks.js";
 import { exportToMarketplace, importFromMarketplace, listMarketplace, deleteFromMarketplace, formatMarketplaceEntry, publishToRemote, browseRemote, installFromRemote, deleteFromRemote, reportToolIssue, publishToolStats, add_marketplace_peer, list_marketplace_peers } from "./tools/marketplace.js";
 import { createResource, getResource, deleteResource, listAllResources, formatResource } from "./mcp/resources.js";
@@ -179,6 +180,15 @@ function ensureDir(): Promise<void> {
     return Promise.resolve();
 }
 
+/** When false (default), only the 8 gateway tools are advertised on MCP tools/list.
+ *  Custom tools stay executable via run {action:"call_tool"} / batch_execute / pipelines / webhooks.
+ *  Set ARCHITECT_EXPOSE_CUSTOM_TOOLS=1 to restore legacy flat MCP export of every custom tool.
+ */
+function exposeCustomToolsAsMcp(): boolean {
+    const v = (process.env.ARCHITECT_EXPOSE_CUSTOM_TOOLS ?? "0").trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 const ACTION_GATEWAY: Record<string, string> = {
     create_tool: "tool", update_tool: "tool", mark_tool_deprecated: "tool",
     validate_tool: "tool", save_tool: "tool", approve_tool: "tool",
@@ -189,11 +199,11 @@ const ACTION_GATEWAY: Record<string, string> = {
     export_tool: "tool", import_tool: "tool",
     list_tools: "find", search_tools: "find", get_tool_source: "find",
     get_tool_graph: "find", match_intent: "find",
+    call_tool: "run",
     batch_execute: "run",
     create_alias: "run", delete_alias: "run", list_aliases: "run", execute_alias: "run",
     create_pipeline: "run", execute_pipeline: "run",
     delete_pipeline: "run", list_pipelines: "run",
-    create_schedule: "automate", delete_schedule: "automate", list_schedules: "automate",
     create_webhook: "automate", delete_webhook: "automate", list_webhooks: "automate",
     set_secret: "store", get_secret: "store", delete_secret: "store", list_secrets: "store",
     set_memory: "store", get_memory: "store", delete_memory: "store",
@@ -219,10 +229,10 @@ const ACTION_GATEWAY: Record<string, string> = {
 };
 
 const GATEWAY_DESCRIPTIONS: Record<string, string> = {
-    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. Created tools become directly callable MCP tools.",
+    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. After create/save, invoke tools via run {action:\"call_tool\"} (or find to discover names).",
     find: "Discover existing tools before building: list, full-text search, view source, dependency graph, intent matching.",
-    run: "Compose and execute tools: batches, aliases with preset params, multi-step pipelines.",
-    automate: "Run tools in the background: cron schedules and HTTP webhooks.",
+    run: "Execute custom tools and compose workflows: call_tool (single), batch_execute, aliases, multi-step pipelines.",
+    automate: "Run tools in the background through HTTP webhooks.",
     store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
     share: "Tool marketplace: publish, browse, install from remote registries and peers.",
     admin: "Operations: execution stats, audit logs, caches, anomaly detection, repair proposals, personas, system status.",
@@ -268,7 +278,7 @@ function gatewayHelp(gateway: string, actions: string[], target: string | null):
         `\n\nCall {action:"help", args:{action:"<name>"}} for an action's args schema.`;
 }
 
-function registerGateways(): void {
+function registerGateways(target: McpServer = server): void {
     const byGateway = new Map<string, string[]>();
     for (const [name, entry] of actionRegistry) {
         const list = byGateway.get(entry.gateway) ?? [];
@@ -276,7 +286,7 @@ function registerGateways(): void {
         byGateway.set(entry.gateway, list);
     }
     for (const [gateway, actions] of byGateway) {
-        server.registerTool(
+        target.registerTool(
             gateway,
             {
                 description: `${GATEWAY_DESCRIPTIONS[gateway] ?? ""} Actions: ${actions.join(", ")}. Use {action:"help"} or {action:"help", args:{action:"<name>"}} for parameter schemas.`,
@@ -333,6 +343,16 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
         throw new Error(`Tool call depth limit (${MAX_TOOL_CALL_DEPTH}) exceeded. Possible circular dependency involving '${name}'.`);
     }
 
+    const action = typeof params.action === "string" ? params.action : null;
+    const gatewayAction = action ? actionRegistry.get(action) : null;
+    if (gatewayAction?.gateway === name) {
+        const { action: _action, ...topLevelArgs } = params;
+        const parsed = gatewayAction.schema.parse(
+            params.args && typeof params.args === "object" ? params.args : topLevelArgs
+        );
+        return gatewayAction.handler(parsed);
+    }
+
     const tool = registeredTools.get(name);
     if (!tool) {
         throw new Error(`Tool '${name}' not found or not active`);
@@ -359,68 +379,63 @@ async function callToolInternal(name: string, params: Record<string, unknown>, d
     }
 }
 
-async function registerCustomTool(tool: CustomTool): Promise<void> {
-    const zodSchema = jsonSchemaToZod(tool.schema);
-    const approvedCaps = await getApprovedCapabilities(tool);
+const httpSessionServers = new Set<McpServer>();
 
-    server.registerTool(
-        tool.name,
-        {
-            description: tool.description,
-            inputSchema: zodSchema,
-        },
-        async (params: Record<string, unknown>) => {
+function buildCustomToolHandler(tool: CustomTool, _approvedCaps?: Awaited<ReturnType<typeof getApprovedCapabilities>>) {
+    return async (params: Record<string, unknown>) => {
             const startTime = Date.now();
+            const liveTool = registeredTools.get(tool.name) ?? tool;
+            const approvedCaps = await getApprovedCapabilities(liveTool);
 
             let deprecationWarning = "";
-            if (tool.failingSince) {
-                const daysSince = Math.floor((Date.now() - new Date(tool.failingSince).getTime()) / 86400000);
-                deprecationWarning = `⚠️ This tool has been failing since ${tool.failingSince} (${daysSince}d). Consider calling update_tool to fix it.\n\n`;
+            if (liveTool.failingSince) {
+                const daysSince = Math.floor((Date.now() - new Date(liveTool.failingSince).getTime()) / 86400000);
+                deprecationWarning = `⚠️ This tool has been failing since ${liveTool.failingSince} (${daysSince}d). Consider calling update_tool to fix it.\n\n`;
             }
 
-            if (tool.rateLimit) {
-                const rateCheck = await checkRateLimit(tool.name, tool.rateLimit);
+            if (liveTool.rateLimit) {
+                const rateCheck = await checkRateLimit(liveTool.name, liveTool.rateLimit);
                 if (!rateCheck.allowed) {
-                    await logAudit("tool_execution_failed", tool.name, { reason: rateCheck.reason });
+                    await logAudit("tool_execution_failed", liveTool.name, { reason: rateCheck.reason });
                     return createToolResponse(`Rate limit: ${rateCheck.reason}`);
                 }
-                await recordRateLimitCall(tool.name);
+                await recordRateLimitCall(liveTool.name);
             }
 
-            if (tool.cache) {
-                const cached = await getCachedResult(tool.name, params, tool.cache);
+            if (liveTool.cache) {
+                const cached = await getCachedResult(liveTool.name, params, liveTool.cache);
                 if (cached.hit) {
                     return createToolResponse(await redactSecrets(stringifyResult(cached.result)) + "\n\n(cached)");
                 }
             }
 
             const sandbox = new ToolSandbox({
-                timeoutMs: tool.timeoutMs ?? 10000,
+                timeoutMs: liveTool.timeoutMs ?? 10000,
                 capabilities: approvedCaps,
-                imports: tool.imports ?? [],
+                imports: liveTool.imports ?? [],
                 toolCaller: (n, p) => callToolInternal(n, p, 1)
             });
 
             try {
                 const executeFn = async () => {
-                    const r = await sandbox.execute(tool.code, params);
+                    const r = await sandbox.execute(liveTool.code, params);
                     if (!r.success) throw new Error(r.error);
                     return r;
                 };
 
                 let result;
-                if (tool.retry) {
-                    result = await executeWithRetry(executeFn, tool.retry);
+                if (liveTool.retry) {
+                    result = await executeWithRetry(executeFn, liveTool.retry);
                 } else {
                     result = await executeFn();
                 }
 
                 const duration = Date.now() - startTime;
-                await recordExecution(tool.name, true, duration);
-                await logAudit("tool_executed", tool.name, {}, duration);
+                await recordExecution(liveTool.name, true, duration);
+                await logAudit("tool_executed", liveTool.name, {}, duration);
 
-                if (tool.cache) {
-                    await setCachedResult(tool.name, params, result.result, tool.cache);
+                if (liveTool.cache) {
+                    await setCachedResult(liveTool.name, params, result.result, liveTool.cache);
                 }
 
                 let output = stringifyResult(result.result);
@@ -437,10 +452,64 @@ async function registerCustomTool(tool: CustomTool): Promise<void> {
             } finally {
                 sandbox.dispose();
             }
-        }
-    );
+        };
+}
 
+function registerToolOnServer(target: McpServer, tool: CustomTool, approvedCaps: Awaited<ReturnType<typeof getApprovedCapabilities>>): void {
+    const zodSchema = jsonSchemaToZod(tool.schema);
+    target.registerTool(
+        tool.name,
+        {
+            description: tool.description,
+            inputSchema: zodSchema,
+        },
+        buildCustomToolHandler(tool, approvedCaps)
+    );
+}
+
+async function registerCustomTool(tool: CustomTool): Promise<void> {
+    const approvedCaps = await getApprovedCapabilities(tool);
+    // Always keep in the internal registry so call_tool / pipelines / webhooks / sandbox callTool work.
     registeredTools.set(tool.name, tool);
+    if (!exposeCustomToolsAsMcp()) {
+        return;
+    }
+    registerToolOnServer(server, tool, approvedCaps);
+    for (const s of httpSessionServers) {
+        try {
+            registerToolOnServer(s, tool, approvedCaps);
+        } catch (err) {
+            console.error(`Failed to register tool '${tool.name}' on HTTP session server:`, err instanceof Error ? err.message : err);
+        }
+    }
+}
+
+function createHttpMcpServer(): McpServer {
+    const s = new McpServer({
+        name: "architect-mcp-server",
+        version: "1.0.0",
+    }, {
+        capabilities: {
+            tools: {
+                listChanged: true
+            }
+        }
+    });
+    registerGateways(s);
+    // Optional legacy mode: advertise every custom tool on MCP tools/list (expensive for client context).
+    if (exposeCustomToolsAsMcp()) {
+        for (const tool of registeredTools.values()) {
+            try {
+                // Caps re-checked inside execution via permission store.
+                registerToolOnServer(s, tool, []);
+            } catch {
+                /* ignore duplicate */
+            }
+        }
+    }
+    httpSessionServers.add(s);
+    // Detach tracking when server has no more refs is best-effort; sessions cleaned on transport close
+    return s;
 }
 
 async function unregisterCustomTool(name: string): Promise<void> {
@@ -1018,14 +1087,15 @@ defineAction(
 defineAction(
     "list_tools",
     {
-        description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists.",
+        description: "List all tools with optional filtering by active status, category, or tag. Run this before building anything to understand what already exists. Deprecated tools are hidden unless include_deprecated=true.",
         inputSchema: z.object({
             active_only: z.boolean().optional(),
+            include_deprecated: z.boolean().optional().describe("Include deprecated tools (default false)"),
             category: z.enum(["api", "file", "data", "utility", "automation", "integration", "other"]).optional(),
             tag: z.string().optional()
         }),
     },
-    async ({ active_only, category, tag }) => {
+    async ({ active_only, include_deprecated, category, tag }) => {
         try {
             const files = await getAllToolFiles();
             if (files.length === 0) {
@@ -1040,6 +1110,7 @@ defineAction(
 
                 try {
                     const tool = await readToolData(name);
+                    if (tool.deprecated && !include_deprecated) continue;
                     if (category && tool.category !== category) continue;
                     if (tag && !tool.tags?.includes(tag)) continue;
 
@@ -1745,6 +1816,43 @@ defineAction(
 );
 
 defineAction(
+    "call_tool",
+    {
+        description: "Execute one custom/active tool by name with a params object. Prefer find {action:\"search_tools\"|\"list_tools\"|\"match_intent\"} to discover names first. This is the primary way to invoke custom tools when they are not individually listed on MCP tools/list.",
+        inputSchema: z.object({
+            name: z.string().describe("Tool name to execute"),
+            params: z.record(z.string(), z.unknown()).optional().describe("Arguments for the tool"),
+            args: z.record(z.string(), z.unknown()).optional().describe("Alias of params")
+        }),
+    },
+    async ({ name, params, args }) => {
+        try {
+            const tool = registeredTools.get(name);
+            if (!tool) {
+                // Fall back to DB lookup so recently approved tools still run even if map is stale
+                if (!(await toolExists(name))) {
+                    return createToolResponse(`Tool '${name}' not found or not active. Use find {action:"search_tools"} to discover tools.`);
+                }
+                const fromDb = await readToolData(name);
+                const { approved, reason } = await checkToolApproval(fromDb);
+                if (!approved) {
+                    return createToolResponse(`Tool '${name}' exists but is not approved: ${reason ?? "capabilities not approved"}. Use tool {action:"approve_tool"}.`);
+                }
+                await registerCustomTool(fromDb);
+            }
+            const live = registeredTools.get(name);
+            if (!live) {
+                return createToolResponse(`Tool '${name}' failed to activate.`);
+            }
+            const handler = buildCustomToolHandler(live);
+            return await handler((params ?? args ?? {}) as Record<string, unknown>);
+        } catch (error) {
+            return createErrorResponse(error);
+        }
+    }
+);
+
+defineAction(
     "batch_execute",
     {
         description: "Execute a tool against multiple inputs in parallel. Use instead of looping callTool() manually. Set concurrency based on rate limits.",
@@ -1887,79 +1995,6 @@ defineAction(
                 `${p.name} - ${p.description} (${p.steps.length} steps)`
             ).join("\n");
             return createToolResponse(`Pipelines (${pipelines.length}):\n\n${output}`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "create_schedule",
-    {
-        description: "Schedule a tool to run automatically on a cron expression. Create a schedule immediately after building any tool for a recurring task — do not wait to be asked.",
-        inputSchema: z.object({
-            tool_name: z.string(),
-            cron: z.string().describe("Cron expression (e.g. '*/5 * * * *')"),
-            params: z.string().default("{}").describe("JSON tool parameters")
-        }),
-    },
-    async ({ tool_name, cron, params }) => {
-        try {
-            let parsedParams: Record<string, unknown>;
-            try {
-                parsedParams = JSON.parse(params);
-            } catch {
-                return createToolResponse("Invalid params JSON.");
-            }
-
-            const schedule = await addSchedule({
-                toolName: tool_name,
-                cron,
-                params: parsedParams
-            });
-
-            await logAudit("schedule_created", tool_name, { scheduleId: schedule.id, cron });
-            return createToolResponse(`Schedule created:\n${formatSchedule(schedule)}`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "delete_schedule",
-    {
-        description: "Delete a schedule. The tool itself is not affected.",
-        inputSchema: z.object({ id: z.string() }),
-    },
-    async ({ id }) => {
-        try {
-            const deleted = await removeSchedule(id);
-            if (!deleted) {
-                return createToolResponse(`Schedule '${id}' not found.`);
-            }
-            await logAudit("schedule_deleted", id);
-            return createToolResponse(`Schedule '${id}' deleted.`);
-        } catch (error) {
-            return createErrorResponse(error);
-        }
-    }
-);
-
-defineAction(
-    "list_schedules",
-    {
-        description: "List all active schedules with next run times.",
-        inputSchema: z.object({}),
-    },
-    async () => {
-        try {
-            const schedules = await listAllSchedules();
-            if (schedules.length === 0) {
-                return createToolResponse("No schedules configured.");
-            }
-            const output = schedules.map(formatSchedule).join("\n\n");
-            return createToolResponse(`Schedules (${schedules.length}):\n\n${output}`);
         } catch (error) {
             return createErrorResponse(error);
         }
@@ -2507,9 +2542,11 @@ defineAction(
     async ({ query, limit = 10 }) => {
         try {
             const files = await getAllToolFiles();
-            const tools = await Promise.all(
-                files.map(f => readToolData(f.replace(".json", "")))
-            );
+            const tools = (
+                await Promise.all(
+                    files.map(f => readToolData(f.replace(".json", "")))
+                )
+            ).filter(t => !t.deprecated);
 
             const response = matchIntent(query, tools);
             const matches = response.matches.slice(0, limit);
@@ -3223,6 +3260,11 @@ async function loadExistingTools(): Promise<void> {
         const name = file.replace(".json", "");
         try {
             const tool = await readToolData(name);
+            if (tool.deprecated) {
+                // Keep in DB for backward-compatible call_tool, but do not activate.
+                registeredTools.delete(name);
+                continue;
+            }
             const { approved, reason } = await checkToolApproval(tool);
             if (!approved) {
                 quarantinedTools.push({ name, reason: reason ?? "Capabilities not approved" });
@@ -3254,7 +3296,7 @@ async function gracefulShutdown(): Promise<void> {
             updated: Array.from(new Set(sessionLog.updated)),
             errors: sessionLog.errors
         };
-        await setMemory("sessions", "last_session", JSON.stringify(sessionData));
+        await setMemory("last_session", JSON.stringify(sessionData), "sessions");
     } catch (err) {
         console.error("Failed to save session context", err);
     }
@@ -3266,6 +3308,7 @@ async function gracefulShutdown(): Promise<void> {
     await flushCache();
     stopWebhookServer();
     stopDashboard();
+    stopMcpHttpServer();
     disposeSandboxPool();
     process.exit(0);
 }
@@ -3273,6 +3316,13 @@ async function gracefulShutdown(): Promise<void> {
 async function main(): Promise<void> {
     process.on("SIGINT", gracefulShutdown);
     process.on("SIGTERM", gracefulShutdown);
+
+    if (process.env.NODE_ENV === "production" && exposeCustomToolsAsMcp()) {
+        throw new Error(
+            "ARCHITECT_EXPOSE_CUSTOM_TOOLS cannot be enabled in production. " +
+            "Use the eight gateways and run {action:\"call_tool\"} for custom integrations."
+        );
+    }
 
     await ensureDir();
     await cleanExpiredCache();
@@ -3290,11 +3340,10 @@ async function main(): Promise<void> {
     startScheduler(callToolInternal);
     startDeprecationChecker(async () => readAllTools(), writeToolData);
     startAnomalyChecker();
-    if ((await listAllWebhooks()).length > 0) {
-        startWebhookServer(3002, callToolInternal);
-    }
+    // Always bind webhook port so reverse proxies do not 502 when idle
+    startWebhookServer(3002, callToolInternal);
     startDashboard(
-        3001,
+        Number(process.env.ARCHITECT_DASHBOARD_PORT ?? 3001),
         () => registeredTools,
         async () => getAllToolFiles(),
         async (name: string) => readToolData(name),
@@ -3325,10 +3374,44 @@ async function main(): Promise<void> {
         }
     );
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    const httpPort = Number(process.env.ARCHITECT_MCP_HTTP_PORT ?? 3003);
+    const enableHttp = process.env.ARCHITECT_MCP_HTTP !== "0";
+    const enableStdio = process.env.ARCHITECT_MCP_STDIO === "1" || Boolean(process.stdin.isTTY);
 
-    console.error(`architect-mcp started with ${registeredTools.size} tools.`);
+    if (enableHttp) {
+        const authSecret = (process.env.MCP_HTTP_SECRET || process.env.DASHBOARD_SECRET || "").trim();
+        if (!authSecret) {
+            throw new Error(
+                "ARCHITECT_MCP_HTTP is enabled but neither MCP_HTTP_SECRET nor DASHBOARD_SECRET is set. " +
+                "Refusing to expose /mcp without authentication. Set one of those secrets, or set ARCHITECT_MCP_HTTP=0."
+            );
+        }
+        startMcpHttpServer({
+            port: httpPort,
+            authSecret,
+            createServer: createHttpMcpServer,
+            disposeServer: (sessionServer) => {
+                httpSessionServers.delete(sessionServer);
+            },
+            sessionIdleTimeoutMs: Number(process.env.ARCHITECT_MCP_SESSION_IDLE_MS ?? 15 * 60 * 1000)
+        });
+    }
+
+    if (enableStdio) {
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+        console.error("MCP stdio transport connected");
+    } else if (!enableHttp) {
+        console.error("No MCP transport enabled (set ARCHITECT_MCP_HTTP!=0 or ARCHITECT_MCP_STDIO=1)");
+    }
+
+    console.error(
+        `architect-mcp tool surface: gateways=8, custom_active=${registeredTools.size}, ` +
+        `mcp_expose_custom=${exposeCustomToolsAsMcp() ? "on" : "off"} ` +
+        `(ARCHITECT_EXPOSE_CUSTOM_TOOLS)`
+    );
+
+    console.error(`architect-mcp started with ${registeredTools.size} tools (http=${enableHttp ? httpPort : "off"}, stdio=${enableStdio}).`);
 }
 
 main().catch((error) => {
