@@ -49,12 +49,57 @@ async function handleSessionRequest(
 ): Promise<Response> {
     session.lastActivityAt = Date.now();
     session.activeRequests++;
-    try {
-        return await session.transport.handleRequest(req, options);
-    } finally {
+    let released = false;
+    const release = () => {
+        if (released) return;
+        released = true;
         session.activeRequests--;
         session.lastActivityAt = Date.now();
+    };
+
+    let response: Response;
+    try {
+        response = await session.transport.handleRequest(req, options);
+    } catch (err) {
+        release();
+        throw err;
     }
+
+    if (!response.body) {
+        release();
+        return response;
+    }
+
+    const reader = response.body.getReader();
+    const trackedBody = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            try {
+                const { done, value } = await reader.read();
+                if (done) {
+                    release();
+                    controller.close();
+                } else {
+                    controller.enqueue(value);
+                }
+            } catch (err) {
+                release();
+                controller.error(err);
+            }
+        },
+        async cancel(reason) {
+            try {
+                await reader.cancel(reason);
+            } finally {
+                release();
+            }
+        }
+    });
+
+    return new Response(trackedBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+    });
 }
 
 function unauthorized(): Response {

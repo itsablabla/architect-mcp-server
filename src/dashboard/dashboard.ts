@@ -44,13 +44,18 @@ export function startDashboard(
     const startedAt = Date.now();
 
     app.get("/health", async (c) => {
-        const storedTools = await getAllToolFiles();
+        let customStoredTools: number | null = null;
+        try {
+            customStoredTools = (await getAllToolFiles()).length;
+        } catch {
+            // Inventory is diagnostic; liveness must not depend on SQLite availability.
+        }
         return c.json({
             status: "ok",
             uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
             mcpAdvertisedTools: 8,
             customActiveTools: getTools().size,
-            customStoredTools: storedTools.length,
+            customStoredTools,
             pid: process.pid
         });
     });
