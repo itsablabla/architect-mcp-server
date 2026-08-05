@@ -65,7 +65,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/raw_content`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/raw_content`,
                 tokenType: p.token_type as LarkTokenType,
             });
             return data.content ?? out("Document content", data);
@@ -81,7 +81,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/blocks`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/blocks`,
                 query: { page_size: p.page_size, page_token: p.page_token },
                 tokenType: p.token_type as LarkTokenType,
             });
@@ -97,7 +97,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/blocks/${p.block_id}`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/blocks/${encodeURIComponent(p.block_id)}`,
                 tokenType: p.token_type as LarkTokenType,
             });
             return out("Block", data.block ?? data);
@@ -115,7 +115,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/blocks/${p.block_id}/children`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/blocks/${encodeURIComponent(p.block_id)}/children`,
                 method: "POST",
                 body: { children: p.children, index: p.index },
                 tokenType: p.token_type as LarkTokenType,
@@ -136,7 +136,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/blocks/${p.block_id}`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/blocks/${encodeURIComponent(p.block_id)}`,
                 method: "PATCH",
                 body: { update_text_elements: { elements: p.elements } },
                 tokenType: p.token_type as LarkTokenType,
@@ -155,7 +155,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/docx/v1/documents/${p.document_id}/blocks/${p.block_id}/children/batch_delete`,
+                path: `/docx/v1/documents/${encodeURIComponent(p.document_id)}/blocks/${encodeURIComponent(p.block_id)}/children/batch_delete`,
                 method: "DELETE",
                 body: { start_index: p.start_index, end_index: p.end_index },
                 tokenType: p.token_type as LarkTokenType,
@@ -193,7 +193,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/wiki/v2/spaces/${p.space_id}/nodes`,
+                path: `/wiki/v2/spaces/${encodeURIComponent(p.space_id)}/nodes`,
                 query: {
                     parent_node_token: p.parent_node_token,
                     page_size: p.page_size,
@@ -217,7 +217,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/wiki/v2/spaces/${p.space_id}/nodes`,
+                path: `/wiki/v2/spaces/${encodeURIComponent(p.space_id)}/nodes`,
                 method: "POST",
                 body: {
                     obj_type: p.obj_type,
@@ -257,7 +257,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/wiki/v2/spaces/${p.space_id}/nodes/${p.node_token}/move`,
+                path: `/wiki/v2/spaces/${encodeURIComponent(p.space_id)}/nodes/${encodeURIComponent(p.node_token)}/move`,
                 method: "POST",
                 body: { target_space_id: p.target_space_id, target_parent_token: p.target_parent_token },
                 tokenType: p.token_type as LarkTokenType,
@@ -293,7 +293,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/sheets/v3/spreadsheets/${p.spreadsheet_token}`,
+                path: `/sheets/v3/spreadsheets/${encodeURIComponent(p.spreadsheet_token)}`,
                 tokenType: p.token_type as LarkTokenType,
             });
             return out("Spreadsheet", data.spreadsheet ?? data);
@@ -307,7 +307,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/sheets/v3/spreadsheets/${p.spreadsheet_token}/sheets/query`,
+                path: `/sheets/v3/spreadsheets/${encodeURIComponent(p.spreadsheet_token)}/sheets/query`,
                 tokenType: p.token_type as LarkTokenType,
             });
             return out("Tabs", data.sheets ?? data);
@@ -327,7 +327,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/sheets/v2/spreadsheets/${p.spreadsheet_token}/values/${encodeURIComponent(p.range)}`,
+                path: `/sheets/v2/spreadsheets/${encodeURIComponent(p.spreadsheet_token)}/values/${encodeURIComponent(p.range)}`,
                 query: {
                     valueRenderOption: p.value_render_option,
                     dateTimeRenderOption: p.dateTime_render_option,
@@ -349,7 +349,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/sheets/v2/spreadsheets/${p.spreadsheet_token}/values`,
+                path: `/sheets/v2/spreadsheets/${encodeURIComponent(p.spreadsheet_token)}/values`,
                 method: "PUT",
                 body: {
                     valueRange: {
@@ -373,7 +373,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/sheets/v2/spreadsheets/${p.spreadsheet_token}/values_batch_get`,
+                path: `/sheets/v2/spreadsheets/${encodeURIComponent(p.spreadsheet_token)}/values_batch_get`,
                 query: {
                     ranges: p.ranges.join(","),
                     valueRenderOption: p.value_render_option,
@@ -396,7 +396,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/drive/v1/permissions/${p.token}/members`,
+                path: `/drive/v1/permissions/${encodeURIComponent(p.token)}/members`,
                 query: { type: p.type, need_public: p.need_public },
                 tokenType: p.token_type as LarkTokenType,
             });
@@ -416,7 +416,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/drive/v1/permissions/${p.token}/members`,
+                path: `/drive/v1/permissions/${encodeURIComponent(p.token)}/members`,
                 method: "POST",
                 query: { type: p.type, need_notification: p.notify },
                 body: {
@@ -438,7 +438,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/drive/v2/permissions/${p.token}/public`,
+                path: `/drive/v2/permissions/${encodeURIComponent(p.token)}/public`,
                 query: { type: p.type },
                 tokenType: p.token_type as LarkTokenType,
             });
@@ -458,7 +458,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/drive/v2/permissions/${p.token}/public`,
+                path: `/drive/v2/permissions/${encodeURIComponent(p.token)}/public`,
                 method: "PATCH",
                 query: { type: p.type },
                 body: p.fields,
