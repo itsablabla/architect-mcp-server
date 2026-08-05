@@ -3429,7 +3429,7 @@ async function main(): Promise<void> {
     }
 
     console.error(
-        `architect-mcp tool surface: gateways=8, custom_active=${registeredTools.size}, ` +
+        `architect-mcp tool surface: gateways=9, custom_active=${registeredTools.size}, ` +
         `mcp_expose_custom=${exposeCustomToolsAsMcp() ? "on" : "off"} ` +
         `(ARCHITECT_EXPOSE_CUSTOM_TOOLS)`
     );
