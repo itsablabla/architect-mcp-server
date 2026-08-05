@@ -32,8 +32,8 @@ function out(label: string, value: unknown): string {
     return `${label}:\n${json}`;
 }
 
-const DOC_TYPE = z.enum(["docx", "sheet", "bitable", "mindnote", "file", "slide", "wiki"]).describe(
-    "Lark object type (drive file type)."
+const DOC_TYPE = z.enum(["doc", "docx", "sheet", "bitable", "mindnote", "file", "slides", "wiki"]).describe(
+    "Lark object type (drive file type). 'doc' is legacy Docs; 'docx' is the current Document type."
 );
 
 export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
@@ -239,7 +239,7 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: "/wiki/v2/nodes/get_node_info",
+                path: "/wiki/v2/spaces/get_node",
                 query: { token: p.token, obj_type: p.obj_type },
                 tokenType: p.token_type as LarkTokenType,
             });
@@ -248,20 +248,21 @@ export const LARK_ACTION_DEFINITIONS: LarkActionDefinition[] = [
     },
     {
         name: "lark_wiki_move_node",
-        description: "Move a Lark Wiki node to a different space and/or parent.",
+        description: "Move a Lark Wiki node to a different space and/or parent within/across wiki spaces.",
         schema: withTokenType({
+            space_id: z.string().describe("Source wiki space id the node currently lives in"),
             node_token: z.string().describe("Wiki node token to move"),
-            target_space_id: z.string().describe("Destination wiki space id"),
+            target_space_id: z.string().optional().describe("Destination wiki space id (omit to move within the same space)"),
             target_parent_token: z.string().optional().describe("Destination parent node token (omit for root)"),
         }),
         handler: async (p) => {
             const data: any = await larkRequest({
-                path: `/wiki/v2/nodes/${p.node_token}/move`,
+                path: `/wiki/v2/spaces/${p.space_id}/nodes/${p.node_token}/move`,
                 method: "POST",
                 body: { target_space_id: p.target_space_id, target_parent_token: p.target_parent_token },
                 tokenType: p.token_type as LarkTokenType,
             });
-            return out("Moved wiki node", data);
+            return out("Moved wiki node", data.node ?? data);
         },
     },
 

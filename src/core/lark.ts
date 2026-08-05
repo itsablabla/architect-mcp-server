@@ -23,7 +23,7 @@ interface CachedToken {
 let tenantTokenCache: CachedToken | null = null;
 
 async function baseUrl(): Promise<string> {
-    const override = await getSecret("LARK_BASE_URL");
+    const override = (await getSecret("LARK_BASE_URL")) || process.env.LARK_BASE_URL;
     return (override || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
