@@ -23,7 +23,7 @@ Once approved by you, that tool runs securely in an isolated sandbox. The next t
 - **Automated Tool Creation:** Agents construct, test, and permanently save their own JavaScript tools on the fly.
 - **Ironclad Security & Sandboxing:** Every custom tool is executed in a highly restricted sandbox. Network or file system access requires explicit user approval through granular capability scopes.
 - **Built-in Web Dashboard:** A beautiful, real-time dashboard UI (running on port `3001` out of the box). Manage your active tools, watch execution logs unfold in real time, monitor failures, and securely manage secrets.
-- **Cron Scheduling:** Not just for manual use! Agents can set up custom tools to run on cron schedules or build continuous background pipelines.
+- **Webhook Automation:** Expose approved custom tools as authenticated HTTP endpoints for event-driven workflows.
 - **Global Marketplace:** Why build from scratch if someone else already did? Agents can search (`marketplace_browse`), install (`marketplace_install`), and even share your creations (`marketplace_publish`) using a GitHub token.
 - **Persistent Data Layer:** Built-in, blazing-fast SQLite storage to manage tools, run logs, and execution states reliably.
 
@@ -83,15 +83,15 @@ Every exposed MCP tool costs context tokens in the AI client's session. Architec
 | `tool` | create, update, validate, approve, activate, test, version, templates, import/export |
 | `find` | list, search, view source, dependency graph, intent matching |
 | `run` | batches, aliases, pipelines |
-| `automate` | cron schedules, webhooks |
+| `automate` | webhooks |
 | `store` | secrets, key-value memory, MCP resources and prompts |
 | `share` | marketplace publish/browse/install, peers |
 | `admin` | stats, audit logs, caches, anomalies, personas, system status |
 | `browser` | all browser automation actions |
 
-Each gateway is called as `{action: "<name>", args: {...}}`. Calling `{action: "help"}` lists available actions; `{action: "help", args: {action: "create_tool"}}` returns that action's full parameter schema. Custom tools created by agents are always registered as directly callable MCP tools.
+Each gateway is called as `{action: "<name>", args: {...}}`. Calling `{action: "help"}` lists available actions; `{action: "help", args: {action: "create_tool"}}` returns that action's full parameter schema. Custom integrations are discovered through `find` and executed through `run` with `{action: "call_tool", args: {name, params}}`. Production refuses legacy flat custom-tool export so clients always receive only these eight gateway schemas.
 
-The webhook server (port `3002`) starts on demand — when a webhook exists or is created.
+The webhook server always binds port `3002` so reverse proxies stay healthy even when no webhook is registered.
 
 **Security:** capability approvals are bound to a SHA-256 hash of the tool's code and imports. Any code change invalidates the approval and the tool must be re-approved — a tool can never silently inherit permissions for new code. Imported tools never carry their own permissions.
 
@@ -124,7 +124,7 @@ Tunable via environment variables: `ARCHITECT_SANDBOX_POOL` (max processes, defa
 1. **Create:** Your AI agent needs to accomplish something new, so it writes the JavaScript code to do it.
 2. **Review & Approve:** You review the tool's requested permissions and click "Approve", granting it secure network or file access. No rogue scripts allowed.
 3. **Execute:** The agent runs its shiny new tool safely inside the isolated sandbox.
-4. **Automate & Share:** The agent can set the tool to run on a schedule, chain it with other tools, or publish it to the global marketplace.
+4. **Automate & Share:** The agent can expose the tool through a webhook, chain it with other tools, or publish it to the global marketplace.
 
 ---
 

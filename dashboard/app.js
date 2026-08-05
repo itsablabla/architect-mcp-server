@@ -138,12 +138,16 @@ const app = {
         el.innerHTML = `
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-label">Total Tools</div>
-                    <div class="stat-value info">${escHtml(data.totalTools || 0)}</div>
+                    <div class="stat-label">MCP Gateways</div>
+                    <div class="stat-value info">${escHtml(data.mcpAdvertisedTools || 0)}</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Active Tools</div>
-                    <div class="stat-value success">${escHtml(data.activeTools || 0)}</div>
+                    <div class="stat-label">Stored Integrations</div>
+                    <div class="stat-value info">${escHtml(data.customStoredTools || 0)}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Active Integrations</div>
+                    <div class="stat-value success">${escHtml(data.customActiveTools || 0)}</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Total Executions</div>
@@ -162,10 +166,6 @@ const app = {
                     <div class="stat-label">Cache Hit Rate</div>
                     <div class="stat-value info">${escHtml(data.cacheHitRate || 0)}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width:${escHtml(data.cacheHitRate || 0)}%;background:var(--info)"></div></div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Schedules</div>
-                    <div class="stat-value warning">${escHtml(data.schedulesCount || 0)}</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Webhooks</div>

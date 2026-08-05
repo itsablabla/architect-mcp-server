@@ -3317,6 +3317,13 @@ async function main(): Promise<void> {
     process.on("SIGINT", gracefulShutdown);
     process.on("SIGTERM", gracefulShutdown);
 
+    if (process.env.NODE_ENV === "production" && exposeCustomToolsAsMcp()) {
+        throw new Error(
+            "ARCHITECT_EXPOSE_CUSTOM_TOOLS cannot be enabled in production. " +
+            "Use the eight gateways and run {action:\"call_tool\"} for custom integrations."
+        );
+    }
+
     await ensureDir();
     await cleanExpiredCache();
     await loadExistingTools();
@@ -3382,7 +3389,11 @@ async function main(): Promise<void> {
         startMcpHttpServer({
             port: httpPort,
             authSecret,
-            createServer: createHttpMcpServer
+            createServer: createHttpMcpServer,
+            disposeServer: (sessionServer) => {
+                httpSessionServers.delete(sessionServer);
+            },
+            sessionIdleTimeoutMs: Number(process.env.ARCHITECT_MCP_SESSION_IDLE_MS ?? 15 * 60 * 1000)
         });
     }
 

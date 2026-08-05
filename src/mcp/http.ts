@@ -14,10 +14,48 @@ export interface McpHttpOptions {
     authSecret?: string;
     /** Build a fully configured McpServer (gateways + custom tools). */
     createServer: () => McpServer;
+    /** Remove a session server from caller-owned tracking after its transport closes. */
+    disposeServer?: (server: McpServer) => void;
+    /** Close abandoned sessions after this idle period. Defaults to 15 minutes. */
+    sessionIdleTimeoutMs?: number;
 }
 
 let httpServer: ReturnType<typeof serve> | null = null;
-const transports: Record<string, Transport> = {};
+interface SessionState {
+    transport: Transport;
+    server: McpServer;
+    lastActivityAt: number;
+    activeRequests: number;
+}
+
+const sessions: Record<string, SessionState> = {};
+let sessionSweepInterval: ReturnType<typeof setInterval> | null = null;
+let disposeSessionServer: ((server: McpServer) => void) | undefined;
+
+function removeSession(sessionId: string, closeTransport = false): void {
+    const session = sessions[sessionId];
+    if (!session) return;
+    delete sessions[sessionId];
+    disposeSessionServer?.(session.server);
+    if (closeTransport) {
+        void session.transport.close().catch(() => { });
+    }
+}
+
+async function handleSessionRequest(
+    session: SessionState,
+    req: Request,
+    options?: Parameters<Transport["handleRequest"]>[1]
+): Promise<Response> {
+    session.lastActivityAt = Date.now();
+    session.activeRequests++;
+    try {
+        return await session.transport.handleRequest(req, options);
+    } finally {
+        session.activeRequests--;
+        session.lastActivityAt = Date.now();
+    }
+}
 
 function unauthorized(): Response {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -42,6 +80,11 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
     }
 
     const app = new Hono();
+    const idleTimeoutMs = opts.sessionIdleTimeoutMs ?? 15 * 60 * 1000;
+    if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1000) {
+        throw new Error("sessionIdleTimeoutMs must be at least 1000 milliseconds");
+    }
+    disposeSessionServer = opts.disposeServer;
 
     app.use(
         "*",
@@ -59,7 +102,12 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
         })
     );
 
-    app.get("/health", (c) => c.json({ status: "ok", service: "architect-mcp-http" }));
+    app.get("/health", (c) => c.json({
+        status: "ok",
+        service: "architect-mcp-http",
+        activeSessions: Object.keys(sessions).length,
+        sessionIdleTimeoutMs: idleTimeoutMs
+    }));
 
     const handleMcp = async (c: any) => {
         const req: Request = c.req.raw;
@@ -72,9 +120,8 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
         try {
             let transport: Transport | undefined;
 
-            if (sessionId && transports[sessionId]) {
-                transport = transports[sessionId];
-                return await transport.handleRequest(req);
+            if (sessionId && sessions[sessionId]) {
+                return await handleSessionRequest(sessions[sessionId], req);
             }
 
             if (req.method === "POST") {
@@ -90,24 +137,34 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
                 }
 
                 if (!sessionId && isInitializeRequest(body)) {
+                    const server = opts.createServer();
                     transport = new WebStandardStreamableHTTPServerTransport({
                         sessionIdGenerator: () => randomUUID(),
                         onsessioninitialized: (sid) => {
-                            transports[sid] = transport!;
+                            sessions[sid] = {
+                                transport: transport!,
+                                server,
+                                lastActivityAt: Date.now(),
+                                activeRequests: 0
+                            };
                         }
                     });
                     transport.onclose = () => {
                         const sid = transport?.sessionId;
-                        if (sid && transports[sid]) delete transports[sid];
+                        if (sid) removeSession(sid);
                     };
 
-                    const server = opts.createServer();
-                    await server.connect(transport);
+                    try {
+                        await server.connect(transport);
+                    } catch (err) {
+                        disposeSessionServer?.(server);
+                        throw err;
+                    }
                     return await transport.handleRequest(req, { parsedBody: body });
                 }
 
-                if (sessionId && transports[sessionId]) {
-                    return await transports[sessionId].handleRequest(req, { parsedBody: body });
+                if (sessionId && sessions[sessionId]) {
+                    return await handleSessionRequest(sessions[sessionId], req, { parsedBody: body });
                 }
 
                 return new Response(JSON.stringify({
@@ -118,10 +175,10 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
             }
 
             if (req.method === "GET" || req.method === "DELETE") {
-                if (!sessionId || !transports[sessionId]) {
+                if (!sessionId || !sessions[sessionId]) {
                     return new Response("Invalid or missing session ID", { status: 400 });
                 }
-                return await transports[sessionId].handleRequest(req);
+                return await handleSessionRequest(sessions[sessionId], req);
             }
 
             return new Response("Method Not Allowed", { status: 405 });
@@ -140,6 +197,15 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
 
     try {
         httpServer = serve({ fetch: app.fetch, port: opts.port });
+        sessionSweepInterval = setInterval(() => {
+            const cutoff = Date.now() - idleTimeoutMs;
+            for (const [sessionId, session] of Object.entries(sessions)) {
+                if (session.activeRequests === 0 && session.lastActivityAt < cutoff) {
+                    removeSession(sessionId, true);
+                }
+            }
+        }, Math.min(60_000, idleTimeoutMs));
+        sessionSweepInterval.unref?.();
         console.error(`MCP HTTP transport on http://localhost:${opts.port}/mcp`);
     } catch (err) {
         console.error(`MCP HTTP failed to start on port ${opts.port}: ${err instanceof Error ? err.message : String(err)}`);
@@ -148,12 +214,14 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
 }
 
 export function stopMcpHttpServer(): void {
-    for (const sid of Object.keys(transports)) {
-        try {
-            void transports[sid].close();
-        } catch { /* ignore */ }
-        delete transports[sid];
+    if (sessionSweepInterval) {
+        clearInterval(sessionSweepInterval);
+        sessionSweepInterval = null;
     }
+    for (const sid of Object.keys(sessions)) {
+        removeSession(sid, true);
+    }
+    disposeSessionServer = undefined;
     if (httpServer) {
         httpServer.close();
         httpServer = null;

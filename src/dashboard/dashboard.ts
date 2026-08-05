@@ -43,11 +43,14 @@ export function startDashboard(
     const app = new Hono();
     const startedAt = Date.now();
 
-    app.get("/health", (c) => {
+    app.get("/health", async (c) => {
+        const storedTools = await getAllToolFiles();
         return c.json({
             status: "ok",
             uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-            activeTools: getTools().size,
+            mcpAdvertisedTools: 8,
+            customActiveTools: getTools().size,
+            customStoredTools: storedTools.length,
             pid: process.pid
         });
     });
@@ -493,8 +496,9 @@ export function startDashboard(
             }
 
             return c.json({
-                totalTools: files.length,
-                activeTools: activeTools.size,
+                mcpAdvertisedTools: 8,
+                customStoredTools: files.length,
+                customActiveTools: activeTools.size,
                 totalCalls,
                 totalSuccess,
                 totalFailed,
