@@ -497,6 +497,7 @@ export const RESERVED_TOOL_NAMES = [
     "share",
     "admin",
     "browser",
+    "lark",
     "help"
 ] as const;
 

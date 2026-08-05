@@ -55,6 +55,8 @@ import { runAnomalyCheck, getActiveAnomalies, clearAnomaly, resetBaseline, start
 import { getMutationCandidates, getMutationContext } from "./core/mutation.js";
 import { matchIntent } from "./core/intent.js";
 import { BROWSER_TOOL_DEFINITIONS } from "./tools/browser-registrations.js";
+import { LARK_ACTION_DEFINITIONS } from "./tools/lark.js";
+import { invalidateLarkTenantToken } from "./core/lark.js";
 
 const server = new McpServer({
     name: "architect-mcp-server",
@@ -236,7 +238,8 @@ const GATEWAY_DESCRIPTIONS: Record<string, string> = {
     store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
     share: "Tool marketplace: publish, browse, install from remote registries and peers.",
     admin: "Operations: execution stats, audit logs, caches, anomaly detection, repair proposals, personas, system status.",
-    browser: "Browser automation: navigate, click, type, scrape, screenshots, tabs."
+    browser: "Browser automation: navigate, click, type, scrape, screenshots, tabs.",
+    lark: "Lark / Feishu docs, sheets, wiki, and sharing: read, create, append, move, and manage permissions."
 };
 
 interface ActionEntry {
@@ -3244,6 +3247,26 @@ for (const def of BROWSER_TOOL_DEFINITIONS) {
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 return { content: [{ type: "text" as const, text: `Browser tool error: ${msg}` }] };
+            }
+        }
+    });
+}
+
+for (const def of LARK_ACTION_DEFINITIONS) {
+    actionRegistry.set(def.name, {
+        gateway: "lark",
+        description: def.description,
+        schema: def.schema,
+        handler: async (params: Record<string, unknown>) => {
+            try {
+                const result = await def.handler(params as Record<string, any>);
+                return { content: [{ type: "text" as const, text: result }] };
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.includes("invalid access token") || msg.includes("code 99991663") || msg.includes("code 99991661")) {
+                    invalidateLarkTenantToken();
+                }
+                return { content: [{ type: "text" as const, text: `Lark tool error: ${msg}` }] };
             }
         }
     });

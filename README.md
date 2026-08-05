@@ -76,7 +76,7 @@ Your data and tools remain safe inside persistent Docker volumes, and the dashbo
 
 ## ⚙️ Gateway API (Token Optimization)
 
-Every exposed MCP tool costs context tokens in the AI client's session. Architect exposes its entire management surface through just **8 gateway tools** (~2K tokens total instead of ~23K for 170+ individual tools):
+Every exposed MCP tool costs context tokens in the AI client's session. Architect exposes its entire management surface through just **9 gateway tools** (~2K tokens total instead of ~23K for 170+ individual tools):
 
 | Gateway | Covers |
 |---|---|
@@ -88,10 +88,13 @@ Every exposed MCP tool costs context tokens in the AI client's session. Architec
 | `share` | marketplace publish/browse/install, peers |
 | `admin` | stats, audit logs, caches, anomalies, personas, system status |
 | `browser` | all browser automation actions |
+| `lark` | Lark / Feishu docs, sheets, wiki, permissions (read, create, append, move, share) |
 
 Each gateway is called as `{action: "<name>", args: {...}}`. Calling `{action: "help"}` lists available actions; `{action: "help", args: {action: "create_tool"}}` returns that action's full parameter schema. Custom integrations are discovered through `find` and executed through `run` with `{action: "call_tool", args: {name, params}}`. Production refuses legacy flat custom-tool export so clients always receive only these eight gateway schemas.
 
 The webhook server always binds port `3002` so reverse proxies stay healthy even when no webhook is registered.
+
+**Lark / Feishu gateway:** the `lark` gateway talks to the Lark Open Platform API. Store your app credentials with the `store` gateway — `set_secret` with names `LARK_APP_ID` and `LARK_APP_SECRET` (from open.larksuite.com or open.feishu.cn). Set `LARK_BASE_URL` (env var or stored secret) to switch between Lark (`https://open.larksuite.com/open-apis`) and Feishu (`https://open.feishu.cn/open-apis`); the first is the default. For user-scoped calls, store `LARK_USER_ACCESS_TOKEN` and pass `token_type: "user"` on an action. Actions cover docs (`lark_doc_create`, `lark_doc_get`, `lark_doc_append`, `lark_doc_update_text`), wiki (`lark_wiki_list_spaces`, `lark_wiki_create_node`, `lark_wiki_move_node`), sheets (`lark_sheet_create`, `lark_sheet_get_values`, `lark_sheet_set_values`), and sharing (`lark_perm_add_member`, `lark_perm_update_public`).
 
 **Security:** capability approvals are bound to a SHA-256 hash of the tool's code and imports. Any code change invalidates the approval and the tool must be re-approved — a tool can never silently inherit permissions for new code. Imported tools never carry their own permissions.
 
