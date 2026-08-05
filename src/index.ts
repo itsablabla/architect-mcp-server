@@ -57,6 +57,7 @@ import { matchIntent } from "./core/intent.js";
 import { BROWSER_TOOL_DEFINITIONS } from "./tools/browser-registrations.js";
 import { LARK_ACTION_DEFINITIONS } from "./tools/lark.js";
 import { invalidateLarkTenantToken } from "./core/lark.js";
+import { GATEWAY_DESCRIPTIONS, GATEWAY_COUNT } from "./core/gateways.js";
 
 const server = new McpServer({
     name: "architect-mcp-server",
@@ -182,7 +183,7 @@ function ensureDir(): Promise<void> {
     return Promise.resolve();
 }
 
-/** When false (default), only the 8 gateway tools are advertised on MCP tools/list.
+/** When false (default), only the gateway tools are advertised on MCP tools/list.
  *  Custom tools stay executable via run {action:"call_tool"} / batch_execute / pipelines / webhooks.
  *  Set ARCHITECT_EXPOSE_CUSTOM_TOOLS=1 to restore legacy flat MCP export of every custom tool.
  */
@@ -230,17 +231,7 @@ const ACTION_GATEWAY: Record<string, string> = {
     get_system_status: "admin"
 };
 
-const GATEWAY_DESCRIPTIONS: Record<string, string> = {
-    tool: "Build and manage custom tools: create, update, validate, approve capabilities, activate, test, version, templates, import/export. After create/save, invoke tools via run {action:\"call_tool\"} (or find to discover names).",
-    find: "Discover existing tools before building: list, full-text search, view source, dependency graph, intent matching.",
-    run: "Execute custom tools and compose workflows: call_tool (single), batch_execute, aliases, multi-step pipelines.",
-    automate: "Run tools in the background through HTTP webhooks.",
-    store: "Persistent data: encrypted secrets, namespaced key-value memory, MCP resources and prompt templates.",
-    share: "Tool marketplace: publish, browse, install from remote registries and peers.",
-    admin: "Operations: execution stats, audit logs, caches, anomaly detection, repair proposals, personas, system status.",
-    browser: "Browser automation: navigate, click, type, scrape, screenshots, tabs.",
-    lark: "Lark / Feishu docs, sheets, wiki, and sharing: read, create, append, move, and manage permissions."
-};
+export { GATEWAY_DESCRIPTIONS, GATEWAY_COUNT } from "./core/gateways.js";
 
 interface ActionEntry {
     gateway: string;

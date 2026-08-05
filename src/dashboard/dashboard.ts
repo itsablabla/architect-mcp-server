@@ -18,6 +18,7 @@ import { listAllPipelines } from "../execution/pipelines.js";
 import { listAllAliases } from "../tools/aliases.js";
 import { listMarketplace, importFromMarketplace, browseRemote } from "../tools/marketplace.js";
 import { getSecret } from "../core/secrets.js";
+import { GATEWAY_COUNT } from "../core/gateways.js";
 import { listAllResources } from "../mcp/resources.js";
 import { listAllPrompts } from "../mcp/prompts.js";
 import { CustomTool } from "../types.js";
@@ -53,7 +54,7 @@ export function startDashboard(
         return c.json({
             status: "ok",
             uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-            mcpAdvertisedTools: 8,
+            mcpAdvertisedTools: GATEWAY_COUNT,
             customActiveTools: getTools().size,
             customStoredTools,
             pid: process.pid
@@ -501,7 +502,7 @@ export function startDashboard(
             }
 
             return c.json({
-                mcpAdvertisedTools: 8,
+                mcpAdvertisedTools: GATEWAY_COUNT,
                 customStoredTools: files.length,
                 customActiveTools: activeTools.size,
                 totalCalls,
