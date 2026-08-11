@@ -118,6 +118,26 @@ function checkAuth(req: Request, secret?: string): boolean {
     return auth === `Bearer ${secret}`;
 }
 
+// Streamable HTTP transport rejects clients that don't advertise both
+// application/json and text/event-stream (406). Many MCP clients send only
+// one of those, or a wildcard Accept. Normalize so agents can connect
+// without per-client config changes.
+const MCP_ACCEPT = "application/json, text/event-stream";
+const WILDCARD_ACCEPT = "*/*";
+
+function normalizeMcpAccept(req: Request): Request {
+    const raw = (req.headers.get("Accept") || "").toLowerCase();
+    const hasJson = raw.includes("application/json") || raw.includes(WILDCARD_ACCEPT);
+    const hasSse = raw.includes("text/event-stream") || raw.includes(WILDCARD_ACCEPT);
+    // Wildcard alone is rejected by the SDK (it checks for both media types literally).
+    if (hasJson && hasSse && raw.includes("application/json") && raw.includes("text/event-stream")) {
+        return req;
+    }
+    const headers = new Headers(req.headers);
+    headers.set("Accept", MCP_ACCEPT);
+    return new Request(req, { headers });
+}
+
 export function startMcpHttpServer(opts: McpHttpOptions): void {
     if (httpServer) return;
     if (!opts.authSecret || !opts.authSecret.trim()) {
@@ -155,11 +175,13 @@ export function startMcpHttpServer(opts: McpHttpOptions): void {
     }));
 
     const handleMcp = async (c: any) => {
-        const req: Request = c.req.raw;
-        if (!checkAuth(req, opts.authSecret)) {
+        const rawReq: Request = c.req.raw;
+        if (!checkAuth(rawReq, opts.authSecret)) {
             return unauthorized();
         }
 
+        // Normalize Accept before the SDK transport sees the request.
+        const req = normalizeMcpAccept(rawReq);
         const sessionId = req.headers.get("mcp-session-id");
 
         try {
