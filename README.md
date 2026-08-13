@@ -62,6 +62,67 @@ MCP client config (Claude Desktop / Claude Code / Cursor):
 
 *(Pro-tip: For development, use `npm run dev` to enable auto-restarts.)*
 
+### Beeper Desktop API MCP (companion binary)
+
+This package also ships a standalone **Beeper Desktop API MCP server** that proxies the official Desktop REST + `/v0/mcp` surface.
+
+```bash
+npm run build
+BEEPER_DESKTOP_TOKEN=bdapi_… \
+BEEPER_DESKTOP_URL=http://127.0.0.1:23373 \
+npm run beeper-desktop
+```
+
+Or via the bin:
+
+```bash
+BEEPER_DESKTOP_TOKEN=bdapi_… beeper-desktop-mcp
+```
+
+MCP client config (local checkout):
+
+```json
+{
+  "mcpServers": {
+    "beeper-desktop": {
+      "command": "node",
+      "args": ["dist/beeper-desktop-mcp/index.js"],
+      "env": {
+        "BEEPER_DESKTOP_TOKEN": "bdapi_…",
+        "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
+      }
+    }
+  }
+}
+```
+
+Or after a global/package install:
+
+```json
+{
+  "mcpServers": {
+    "beeper-desktop": {
+      "command": "npx",
+      "args": ["-y", "architect-mcp-server", "beeper-desktop"],
+      "env": {
+        "BEEPER_DESKTOP_TOKEN": "bdapi_…",
+        "BEEPER_DESKTOP_URL": "http://127.0.0.1:23373"
+      }
+    }
+  }
+}
+```
+
+Equivalent bin forms:
+
+```bash
+npx -y -p architect-mcp-server beeper-desktop-mcp
+# or
+architect-mcp beeper-desktop
+```
+
+Tools include the official Desktop MCP set (`get_accounts`, `search_chats`, `list_messages`, `send_message`, …) plus helpers (`beeper_health`, `list_chats`, `desktop_tools`, `desktop_mcp_call`).
+
 ### 2. Docker Setup (Recommended)
 
 Don't want to mess with Node environments? Just spin it up with Docker Compose:
